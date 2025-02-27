@@ -16,15 +16,26 @@ def setup_logging(log_level):
     if not isinstance(numeric_level, int):
         raise ValueError(f'Invalid log level: {log_level}')
     
+    # Create logs directory if it doesn't exist
+    logs_dir = os.path.join(os.getcwd(), 'logs')
+    os.makedirs(logs_dir, exist_ok=True)
+    
+    # Create a timestamped log file
+    import datetime
+    timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
+    log_file = os.path.join(logs_dir, f"training_{timestamp}.log")
+    
     logging.basicConfig(
         level=numeric_level,
         format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
         handlers=[
-            logging.FileHandler("training.log"),
+            logging.FileHandler(log_file),
             logging.StreamHandler()
         ]
     )
-    return logging.getLogger("golf-ai")
+    logger = logging.getLogger("golf-ai")
+    logger.info(f"Logging to {log_file}")
+    return logger, logs_dir
 
 # Logger will be properly configured in main
 
@@ -41,6 +52,7 @@ def parse_args():
     parser.add_argument('--target-update', type=int, default=1000, help='Target network update frequency')
     parser.add_argument('--eval-interval', type=int, default=500, help='Evaluation interval')
     parser.add_argument('--save-dir', type=str, default='models', help='Directory to save models')
+    parser.add_argument('--logs-dir', type=str, default='logs', help='Directory to save logs and charts')
     parser.add_argument('--load-model', type=str, default=None, help='Path to load model from')
     parser.add_argument('--log-level', type=str, default='INFO', 
                         choices=['DEBUG', 'INFO', 'WARNING', 'ERROR', 'CRITICAL'],
@@ -146,7 +158,7 @@ def evaluate_agent(agent, num_episodes=100, logger=None):
         
     return avg_reward, win_rate, loss_rate, max_turns_rate, avg_agent_score, score_diff
 
-def train(args, logger):
+def train(args, logger, logs_dir):
     """Train the DQN agent."""
     logger.info(f"Starting training with args: {args}")
     
@@ -177,6 +189,15 @@ def train(args, logger):
         per_beta=0.4,        # Start value for importance sampling (0 = no correction, 1 = full)
         per_beta_increment=0.0001  # Beta increment per learning step
     )
+    
+    # Log device information
+    device_info = f"Using device: {agent.device}"
+    if agent.device.type == 'cuda':
+        device_info += f" ({torch.cuda.get_device_name(0)})"
+        # Enable cuDNN benchmarking for faster training
+        torch.backends.cudnn.benchmark = True
+        logger.info("CUDA detected - Enabled cuDNN benchmarking for faster training")
+    logger.info(device_info)
     
     logger.info("Using Prioritized Experience Replay with win episode marking")
     
@@ -220,6 +241,104 @@ def train(args, logger):
     learning_rate_adjustments = 0
     lr_history = [args.lr]  # Start with initial learning rate
     lr_history_episodes = [0]  # Episodes where LR changed
+    
+    # Function to save charts
+    def save_charts(episode):
+        plt.figure(figsize=(15, 15))  # Increased height for more plots
+        
+        plt.subplot(3, 3, 1)
+        plt.plot(rewards)
+        plt.title('Episode Rewards')
+        plt.xlabel('Episode')
+        plt.ylabel('Reward')
+        
+        plt.subplot(3, 3, 2)
+        plt.plot(losses)
+        plt.title('Training Loss')
+        plt.xlabel('Episode')
+        plt.ylabel('Loss')
+        
+        if eval_rewards:
+            plt.subplot(3, 3, 3)
+            plt.plot(range(0, len(eval_rewards) * args.eval_interval, args.eval_interval), eval_rewards)
+            plt.title('Evaluation Rewards')
+            plt.xlabel('Episode')
+            plt.ylabel('Average Reward')
+            
+            plt.subplot(3, 3, 4)
+            plt.plot(range(0, len(eval_win_rates) * args.eval_interval, args.eval_interval), eval_win_rates)
+            plt.title('Win Rate vs Random Opponent')
+            plt.xlabel('Episode')
+            plt.ylabel('Win Rate')
+            
+            plt.subplot(3, 3, 5)
+            plt.plot(range(0, len(eval_loss_rates) * args.eval_interval, args.eval_interval), eval_loss_rates)
+            plt.title('Loss Rate vs Random Opponent')
+            plt.xlabel('Episode')
+            plt.ylabel('Loss Rate')
+            
+            plt.subplot(3, 3, 6)
+            plt.plot(range(0, len(eval_max_turns_rates) * args.eval_interval, args.eval_interval), eval_max_turns_rates)
+            plt.title('Max Turns Rate')
+            plt.xlabel('Episode')
+            plt.ylabel('Rate of Games Reaching Max Turns')
+            
+            # New plots for Golf-specific metrics
+            plt.subplot(3, 3, 7)
+            eval_episodes = range(0, len(eval_avg_scores) * args.eval_interval, args.eval_interval)
+            plt.plot(eval_episodes, eval_avg_scores, label='Agent')
+            # Add a baseline of a random agent (based on opponent's average score)
+            random_scores = []
+            for score_diff, agent_score in zip(eval_score_diffs, eval_avg_scores):
+                random_scores.append(agent_score + score_diff)  # Reconstruct opponent score
+            plt.plot(eval_episodes, random_scores, label='Random')
+            plt.title('Average Golf Score (Lower is Better)')
+            plt.xlabel('Episode')
+            plt.ylabel('Score')
+            plt.legend()
+            
+            plt.subplot(3, 3, 8)
+            plt.plot(eval_episodes, eval_score_diffs)
+            plt.title('Score Difference (Agent vs Random)')
+            plt.xlabel('Episode')
+            plt.ylabel('Score Diff (Positive = Better)')
+        
+        plt.subplot(3, 3, 9)
+        # Plot agent's current learning rate
+        plt.plot(lr_history_episodes, lr_history)
+        plt.title('Learning Rate Adjustments')
+        plt.xlabel('Episode')
+        plt.ylabel('Learning Rate')
+        
+        plt.tight_layout()
+        
+        # Save to both model directory and logs directory
+        plt.savefig(os.path.join(args.save_dir, 'training_curves.png'))
+        plt.savefig(os.path.join(logs_dir, f'training_curves_ep{episode+1}.png'))
+        plt.close()  # Close the figure to free memory
+        
+        # Save metrics as CSV for later analysis
+        import pandas as pd
+        if eval_rewards:
+            eval_data = {
+                'Episode': range(0, len(eval_rewards) * args.eval_interval, args.eval_interval),
+                'Reward': eval_rewards,
+                'WinRate': eval_win_rates,
+                'LossRate': eval_loss_rates,
+                'MaxTurnsRate': eval_max_turns_rates,
+                'AvgScore': eval_avg_scores,
+                'ScoreDiff': eval_score_diffs
+            }
+            pd.DataFrame(eval_data).to_csv(os.path.join(logs_dir, 'eval_metrics.csv'), index=False)
+        
+        # Save training metrics
+        train_data = {
+            'Episode': range(len(rewards)),
+            'Reward': rewards
+        }
+        if losses:
+            train_data['Loss'] = losses + [None] * (len(rewards) - len(losses))
+        pd.DataFrame(train_data).to_csv(os.path.join(logs_dir, 'training_metrics.csv'), index=False)
     
     logger.info("Starting training loop")
     for episode in tqdm(range(args.episodes)):
@@ -391,6 +510,11 @@ def train(args, logger):
             
             logger.info(f"Stats: Win Rate={win_rate:.2f}, Avg Steps={avg_steps:.1f}, Max Turns Rate={max_turns_rate:.2f}")
             logger.info(f"Stability: High Losses={high_loss_count}{stability_info}")
+            
+            # Save charts every 1000 episodes
+            if (episode + 1) % 1000 == 0:
+                logger.info(f"Saving training charts at episode {episode+1}")
+                save_charts(episode)
         
         # Evaluate agent periodically
         if (episode + 1) % args.eval_interval == 0:
@@ -432,95 +556,36 @@ def train(args, logger):
             
             # Save checkpoint
             agent.save(os.path.join(args.save_dir, f'checkpoint_{episode+1}.pth'))
+            
+            # Save charts after each evaluation
+            logger.info(f"Saving training charts after evaluation at episode {episode+1}")
+            save_charts(episode)
     
     # Save final model
     final_model_path = os.path.join(args.save_dir, 'final_model.pth')
     agent.save(final_model_path)
     logger.info(f"Training complete. Final model saved to {final_model_path}")
     
-    # Plot training curves
-    plt.figure(figsize=(15, 15))  # Increased height for more plots
+    # Save final charts
+    save_charts(args.episodes - 1)
     
-    plt.subplot(3, 3, 1)
-    plt.plot(rewards)
-    plt.title('Episode Rewards')
-    plt.xlabel('Episode')
-    plt.ylabel('Reward')
-    
-    plt.subplot(3, 3, 2)
-    plt.plot(losses)
-    plt.title('Training Loss')
-    plt.xlabel('Episode')
-    plt.ylabel('Loss')
-    
-    plt.subplot(3, 3, 3)
-    plt.plot(range(0, len(eval_rewards) * args.eval_interval, args.eval_interval), eval_rewards)
-    plt.title('Evaluation Rewards')
-    plt.xlabel('Episode')
-    plt.ylabel('Average Reward')
-    
-    plt.subplot(3, 3, 4)
-    plt.plot(range(0, len(eval_win_rates) * args.eval_interval, args.eval_interval), eval_win_rates)
-    plt.title('Win Rate vs Random Opponent')
-    plt.xlabel('Episode')
-    plt.ylabel('Win Rate')
-    
-    plt.subplot(3, 3, 5)
-    plt.plot(range(0, len(eval_loss_rates) * args.eval_interval, args.eval_interval), eval_loss_rates)
-    plt.title('Loss Rate vs Random Opponent')
-    plt.xlabel('Episode')
-    plt.ylabel('Loss Rate')
-    
-    plt.subplot(3, 3, 6)
-    plt.plot(range(0, len(eval_max_turns_rates) * args.eval_interval, args.eval_interval), eval_max_turns_rates)
-    plt.title('Max Turns Rate')
-    plt.xlabel('Episode')
-    plt.ylabel('Rate of Games Reaching Max Turns')
-    
-    # New plots for Golf-specific metrics
-    plt.subplot(3, 3, 7)
-    eval_episodes = range(0, len(eval_avg_scores) * args.eval_interval, args.eval_interval)
-    plt.plot(eval_episodes, eval_avg_scores, label='Agent')
-    # Add a baseline of a random agent (based on opponent's average score)
-    random_scores = []
-    for score_diff, agent_score in zip(eval_score_diffs, eval_avg_scores):
-        random_scores.append(agent_score + score_diff)  # Reconstruct opponent score
-    plt.plot(eval_episodes, random_scores, label='Random')
-    plt.title('Average Golf Score (Lower is Better)')
-    plt.xlabel('Episode')
-    plt.ylabel('Score')
-    plt.legend()
-    
-    plt.subplot(3, 3, 8)
-    plt.plot(eval_episodes, eval_score_diffs)
-    plt.title('Score Difference (Agent vs Random)')
-    plt.xlabel('Episode')
-    plt.ylabel('Score Diff (Positive = Better)')
-    
-    plt.subplot(3, 3, 9)
-    # If we have learning rate adjustments, plot agent's current learning rate
-    if 'lr_history' in locals():
-        plt.plot(lr_history_episodes, lr_history)
-        plt.title('Learning Rate Adjustments')
-        plt.xlabel('Episode')
-        plt.ylabel('Learning Rate')
-    else:
-        # Alternative plot if no LR history: show high loss events
-        if high_loss_count > 0:
-            plt.bar(['High Losses'], [high_loss_count])
-            plt.title('Learning Stability')
-            plt.ylabel('Count')
-    
-    plt.tight_layout()
-    plt.savefig(os.path.join(args.save_dir, 'training_curves.png'))
-    plt.show()
+    # Return final charts path for display
+    return os.path.join(logs_dir, f'training_curves_ep{args.episodes}.png')
 
 if __name__ == "__main__":
     args = parse_args()
-    logger = setup_logging(args.log_level)
+    logger, logs_dir = setup_logging(args.log_level)
+    
+    # Override logs_dir if specified in args
+    if args.logs_dir != 'logs':
+        logs_dir = args.logs_dir
+        os.makedirs(logs_dir, exist_ok=True)
+        logger.info(f"Using custom logs directory: {logs_dir}")
+    
     try:
         logger.info("Starting Golf Card Game AI training")
-        train(args, logger)
+        final_chart_path = train(args, logger, logs_dir)
+        logger.info(f"Training complete. Final charts saved to {final_chart_path}")
     except Exception as e:
         logger.exception(f"Error during training: {str(e)}")
         raise 

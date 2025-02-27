@@ -17,6 +17,9 @@ class GolfMLP(nn.Module):
     def __init__(self, input_size: int = 60, hidden_size: int = 512, output_size: int = 9):
         super(GolfMLP, self).__init__()
         
+        # Determine if CUDA is available for optimizations
+        self.use_cuda = torch.cuda.is_available()
+        
         # Deeper network with larger hidden size and different activation functions
         self.network = nn.Sequential(
             # Input layer
@@ -55,6 +58,11 @@ class GolfMLP(nn.Module):
         
         # Initialize weights using Kaiming initialization (better for LeakyReLU)
         self._initialize_weights()
+        
+        # Optimize memory usage for CUDA if available
+        if self.use_cuda:
+            # Use channels_last memory format for better performance on CUDA
+            self = self.to(memory_format=torch.channels_last)
     
     def _initialize_weights(self):
         for m in self.modules():
@@ -63,6 +71,9 @@ class GolfMLP(nn.Module):
                 nn.init.constant_(m.bias, 0.01)
     
     def forward(self, x):
+        # Convert input to channels_last format if using CUDA for better performance
+        if self.use_cuda and x.dim() >= 3:
+            x = x.to(memory_format=torch.channels_last)
         return self.network(x)
 
 
@@ -204,8 +215,16 @@ class DQNAgent:
             self.device = torch.device("mps")
         elif torch.cuda.is_available():
             self.device = torch.device("cuda")
+            # Enable CUDA optimizations
+            torch.backends.cudnn.benchmark = True
+            # Set tensor cores precision if available (Ampere GPUs and newer)
+            if torch.cuda.get_device_capability()[0] >= 8:  # Ampere or newer
+                # Use TF32 precision (faster than FP32, almost as accurate)
+                torch.backends.cuda.matmul.allow_tf32 = True
+                torch.backends.cudnn.allow_tf32 = True
         else:
             self.device = torch.device("cpu")
+            
         self.q_network = GolfMLP(state_size, hidden_size, action_size).to(self.device)
         self.target_network = GolfMLP(state_size, hidden_size, action_size).to(self.device)
         self.target_network.load_state_dict(self.q_network.state_dict())
@@ -217,6 +236,11 @@ class DQNAgent:
         # Target network update frequency
         self.target_update = target_update
         self.update_counter = 0
+        
+        # For mixed precision training when CUDA is available
+        self.use_amp = self.device.type == 'cuda'
+        if self.use_amp:
+            self.scaler = torch.cuda.amp.GradScaler()
     
     def select_action(self, state: np.ndarray, valid_actions: List[int], training: bool = True) -> int:
         """
@@ -325,37 +349,69 @@ class DQNAgent:
         dones = torch.FloatTensor(np.array(dones)).to(self.device)
         weights = torch.FloatTensor(weights).to(self.device)  # Importance sampling weights
         
-        # Compute current Q values
-        current_q = self.q_network(states).gather(1, actions.unsqueeze(1)).squeeze(1)
-        
-        # Compute target Q values using Double DQN
-        with torch.no_grad():
-            # Get actions from current network
-            next_actions = self.q_network(next_states).argmax(1, keepdim=True)
+        # Compute current Q values and target Q values using mixed precision when available
+        if self.use_amp:
+            with torch.cuda.amp.autocast():
+                # Compute current Q values
+                current_q = self.q_network(states).gather(1, actions.unsqueeze(1)).squeeze(1)
+                
+                # Compute target Q values using Double DQN
+                with torch.no_grad():
+                    # Get actions from current network
+                    next_actions = self.q_network(next_states).argmax(1, keepdim=True)
+                    
+                    # Get Q-values from target network for those actions
+                    next_q = self.target_network(next_states).gather(1, next_actions).squeeze(1)
+                    
+                    # Compute target Q values
+                    target_q = rewards + (1 - dones) * self.gamma * next_q
+                
+                # Compute loss with importance sampling weights
+                loss = torch.mean(weights * (current_q - target_q) ** 2)
             
-            # Get Q-values from target network for those actions
-            next_q = self.target_network(next_states).gather(1, next_actions).squeeze(1)
+            # Optimize with mixed precision
+            self.optimizer.zero_grad()
+            self.scaler.scale(loss).backward()
             
-            # Compute target Q values
-            target_q = rewards + (1 - dones) * self.gamma * next_q
-        
-        # Compute TD errors for updating priorities
-        td_errors = torch.abs(current_q - target_q).detach().cpu().numpy()
-        
-        # Update priorities in replay buffer
-        self.memory.update_priorities(indices, td_errors)
-        
-        # Compute loss with importance sampling weights
-        loss = torch.mean(weights * (current_q - target_q) ** 2)
-        
-        # Optimize the model
-        self.optimizer.zero_grad()
-        loss.backward()
-        
-        # Gradient clipping to prevent exploding gradients
-        torch.nn.utils.clip_grad_norm_(self.q_network.parameters(), 1.0)
-        
-        self.optimizer.step()
+            # Gradient clipping to prevent exploding gradients
+            self.scaler.unscale_(self.optimizer)
+            torch.nn.utils.clip_grad_norm_(self.q_network.parameters(), 1.0)
+            
+            self.scaler.step(self.optimizer)
+            self.scaler.update()
+        else:
+            # Standard precision training
+            # Compute current Q values
+            current_q = self.q_network(states).gather(1, actions.unsqueeze(1)).squeeze(1)
+            
+            # Compute target Q values using Double DQN
+            with torch.no_grad():
+                # Get actions from current network
+                next_actions = self.q_network(next_states).argmax(1, keepdim=True)
+                
+                # Get Q-values from target network for those actions
+                next_q = self.target_network(next_states).gather(1, next_actions).squeeze(1)
+                
+                # Compute target Q values
+                target_q = rewards + (1 - dones) * self.gamma * next_q
+            
+            # Compute TD errors for updating priorities
+            td_errors = torch.abs(current_q - target_q).detach().cpu().numpy()
+            
+            # Update priorities in replay buffer
+            self.memory.update_priorities(indices, td_errors)
+            
+            # Compute loss with importance sampling weights
+            loss = torch.mean(weights * (current_q - target_q) ** 2)
+            
+            # Optimize the model
+            self.optimizer.zero_grad()
+            loss.backward()
+            
+            # Gradient clipping to prevent exploding gradients
+            torch.nn.utils.clip_grad_norm_(self.q_network.parameters(), 1.0)
+            
+            self.optimizer.step()
         
         # Update target network periodically
         self.update_counter += 1
@@ -377,12 +433,14 @@ class DQNAgent:
             # Don't save the buffer itself, but save the PER parameters
             'per_alpha': self.memory.alpha,
             'per_beta': self.memory.beta,
-            'per_max_priority': self.memory.max_priority
+            'per_max_priority': self.memory.max_priority,
+            # Save AMP scaler if using mixed precision
+            'amp_scaler': self.scaler.state_dict() if self.use_amp else None
         }, path)
     
     def load(self, path: str):
         """Load model weights and PER state."""
-        checkpoint = torch.load(path)
+        checkpoint = torch.load(path, map_location=self.device)
         self.q_network.load_state_dict(checkpoint['q_network'])
         self.target_network.load_state_dict(checkpoint['target_network'])
         self.optimizer.load_state_dict(checkpoint['optimizer'])
@@ -392,4 +450,8 @@ class DQNAgent:
         if 'per_alpha' in checkpoint and 'per_beta' in checkpoint and 'per_max_priority' in checkpoint:
             self.memory.alpha = checkpoint['per_alpha']
             self.memory.beta = checkpoint['per_beta']
-            self.memory.max_priority = checkpoint['per_max_priority'] 
+            self.memory.max_priority = checkpoint['per_max_priority']
+            
+        # Load AMP scaler if available and using mixed precision
+        if self.use_amp and 'amp_scaler' in checkpoint and checkpoint['amp_scaler'] is not None:
+            self.scaler.load_state_dict(checkpoint['amp_scaler']) 

@@ -430,6 +430,23 @@ def train(args, logger, logs_dir):
     # Batch size for environment steps (to reduce Python overhead)
     env_batch_size = 4 if use_multiprocessing else 1
     
+    # Adjust learning frequency based on device
+    if agent.device.type == 'cuda':
+        # On GPU, we can afford to learn less frequently but with larger batches
+        learn_every = 8  # Learn every 8 steps to reduce overhead
+        # Increase effective batch size for better GPU utilization
+        effective_batch_size = args.batch_size * 2
+        logger.info(f"GPU detected: Learning every {learn_every} steps with effective batch size {effective_batch_size}")
+    else:
+        # On CPU, learn more frequently with smaller batches
+        learn_every = 4
+        effective_batch_size = args.batch_size
+        logger.info(f"CPU mode: Learning every {learn_every} steps with batch size {effective_batch_size}")
+    
+    # Pre-allocate memory for experiences
+    experiences_batch = []
+    experiences_capacity = learn_every * 2  # Double capacity to avoid frequent resizing
+    
     logger.info("Starting training loop")
     for episode in tqdm(range(args.episodes)):
         if episode % 10 == 0:
@@ -444,9 +461,8 @@ def train(args, logger, logs_dir):
         # Self-play loop
         agent_player = 0  # Agent always starts as player 0
         
-        # Batch for storing experiences
+        # Clear experiences batch at the start of each episode
         experiences_batch = []
-        learn_every = 4  # Learn every N steps to reduce overhead
         
         while not done:
             current_player = env.current_player
@@ -463,38 +479,53 @@ def train(args, logger, logs_dir):
                 
                 # Only learn periodically to reduce overhead
                 if len(experiences_batch) >= learn_every or done:
-                    # Add all experiences to replay buffer
+                    # Add all experiences to replay buffer in a batch
                     for exp in experiences_batch:
                         s, a, r, ns, d = exp
                         agent.remember(s, a, r, ns, d)
                     
-                    # Learn from experiences
-                    loss = agent.learn()
-                    if loss is not None:
-                        # Check for potential learning instability
-                        if loss > 100:
-                            high_loss_count += 1
-                            consecutive_high_losses += 1
-                            logger.warning(f"High loss detected: {loss:.2f} at step {steps}, episode {episode+1}")
+                    # Learn multiple times if we have enough data
+                    # This improves sample efficiency without frequent buffer sampling
+                    num_learn_steps = 1
+                    if len(agent.memory) >= effective_batch_size:
+                        # If we have a lot of data, do multiple learning steps
+                        if agent.device.type == 'cuda':
+                            num_learn_steps = 2  # More learning steps on GPU for better utilization
+                        
+                        total_loss = 0
+                        for _ in range(num_learn_steps):
+                            loss = agent.learn()
+                            if loss is not None:
+                                total_loss += loss
+                        
+                        # Average loss over learning steps
+                        if num_learn_steps > 0:
+                            avg_loss = total_loss / num_learn_steps
                             
-                            # Automatic learning rate adjustment
-                            if consecutive_high_losses >= 5:
-                                # Reduce learning rate
-                                for param_group in agent.optimizer.param_groups:
-                                    param_group['lr'] *= 0.5
-                                    new_lr = param_group['lr']
+                            # Check for potential learning instability
+                            if avg_loss > 100:
+                                high_loss_count += 1
+                                consecutive_high_losses += 1
+                                logger.warning(f"High loss detected: {avg_loss:.2f} at step {steps}, episode {episode+1}")
                                 
-                                # Record learning rate change
-                                learning_rate_adjustments += 1
-                                lr_history.append(new_lr)
-                                lr_history_episodes.append(episode)
+                                # Automatic learning rate adjustment
+                                if consecutive_high_losses >= 5:
+                                    # Reduce learning rate
+                                    for param_group in agent.optimizer.param_groups:
+                                        param_group['lr'] *= 0.5
+                                        new_lr = param_group['lr']
+                                    
+                                    # Record learning rate change
+                                    learning_rate_adjustments += 1
+                                    lr_history.append(new_lr)
+                                    lr_history_episodes.append(episode)
+                                    
+                                    logger.warning(f"Adjusted learning rate to {new_lr:.6f} due to instability")
+                                    consecutive_high_losses = 0
+                            else:
+                                consecutive_high_losses = 0  # Reset counter when loss is normal
                                 
-                                logger.warning(f"Adjusted learning rate to {new_lr:.6f} due to instability")
-                                consecutive_high_losses = 0
-                        else:
-                            consecutive_high_losses = 0  # Reset counter when loss is normal
-                            
-                        episode_losses.append(loss)
+                            episode_losses.append(avg_loss)
                     
                     # Clear batch after learning
                     experiences_batch = []

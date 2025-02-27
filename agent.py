@@ -399,49 +399,68 @@ class DQNAgent:
         if hasattr(self.memory, '_initialized') and self.memory._initialized:
             # Data is already in numpy arrays, just convert to tensors
             states, actions, rewards, next_states, dones = zip(*batch)
-            states = torch.FloatTensor(states).to(self.device, non_blocking=True)
-            actions = torch.LongTensor(actions).to(self.device, non_blocking=True)
-            rewards = torch.FloatTensor(rewards).to(self.device, non_blocking=True)
-            next_states = torch.FloatTensor(next_states).to(self.device, non_blocking=True)
-            dones = torch.FloatTensor(dones).to(self.device, non_blocking=True)
+            
+            # Pin memory for faster CPU->GPU transfer
+            states_tensor = torch.from_numpy(np.array(states, dtype=np.float32)).pin_memory().to(self.device, non_blocking=True)
+            next_states_tensor = torch.from_numpy(np.array(next_states, dtype=np.float32)).pin_memory().to(self.device, non_blocking=True)
+            
+            # Smaller tensors can be transferred directly
+            actions_tensor = torch.tensor(actions, dtype=torch.long, device=self.device)
+            rewards_tensor = torch.tensor(rewards, dtype=torch.float32, device=self.device)
+            dones_tensor = torch.tensor(dones, dtype=torch.float32, device=self.device)
         else:
             # Need to convert from list of tuples
             states, actions, rewards, next_states, dones = zip(*batch)
+            
             # Pre-allocate numpy arrays for faster conversion
             states_np = np.array(states, dtype=np.float32)
-            actions_np = np.array(actions, dtype=np.int64)
-            rewards_np = np.array(rewards, dtype=np.float32)
             next_states_np = np.array(next_states, dtype=np.float32)
-            dones_np = np.array(dones, dtype=np.float32)
             
-            # Convert to tensors with non_blocking=True for asynchronous transfer
-            states = torch.from_numpy(states_np).to(self.device, non_blocking=True)
-            actions = torch.from_numpy(actions_np).to(self.device, non_blocking=True)
-            rewards = torch.from_numpy(rewards_np).to(self.device, non_blocking=True)
-            next_states = torch.from_numpy(next_states_np).to(self.device, non_blocking=True)
-            dones = torch.from_numpy(dones_np).to(self.device, non_blocking=True)
+            # Pin memory for faster CPU->GPU transfer
+            states_tensor = torch.from_numpy(states_np).pin_memory().to(self.device, non_blocking=True)
+            next_states_tensor = torch.from_numpy(next_states_np).pin_memory().to(self.device, non_blocking=True)
+            
+            # Smaller tensors can be transferred directly
+            actions_tensor = torch.tensor(actions, dtype=torch.long, device=self.device)
+            rewards_tensor = torch.tensor(rewards, dtype=torch.float32, device=self.device)
+            dones_tensor = torch.tensor(dones, dtype=torch.float32, device=self.device)
         
-        weights = torch.FloatTensor(weights).to(self.device, non_blocking=True)  # Importance sampling weights
+        # Convert weights to tensor
+        weights_tensor = torch.tensor(weights, dtype=torch.float32, device=self.device)
         
         # Compute current Q values and target Q values using mixed precision when available
         if self.use_amp:
             with torch.cuda.amp.autocast():
-                # Compute current Q values
-                current_q = self.q_network(states).gather(1, actions.unsqueeze(1)).squeeze(1)
+                # Compute Q-values for both current and next states in a single forward pass
+                # This reduces kernel launch overhead
+                combined_states = torch.cat([states_tensor, next_states_tensor], dim=0)
+                combined_q_values = self.q_network(combined_states)
+                
+                # Split the results
+                batch_size = states_tensor.shape[0]
+                current_q_all = combined_q_values[:batch_size]
+                next_q_all = combined_q_values[batch_size:]
+                
+                # Gather current Q values for the actions taken
+                current_q = current_q_all.gather(1, actions_tensor.unsqueeze(1)).squeeze(1)
                 
                 # Compute target Q values using Double DQN
                 with torch.no_grad():
-                    # Get actions from current network
-                    next_actions = self.q_network(next_states).argmax(1, keepdim=True)
+                    # Get actions from current network (already computed above)
+                    next_actions = next_q_all.argmax(1, keepdim=True)
                     
                     # Get Q-values from target network for those actions
-                    next_q = self.target_network(next_states).gather(1, next_actions).squeeze(1)
+                    # Use torch.no_grad() to avoid tracking gradients
+                    target_q_all = self.target_network(next_states_tensor)
+                    next_q = target_q_all.gather(1, next_actions).squeeze(1)
                     
                     # Compute target Q values
-                    target_q = rewards + (1 - dones) * self.gamma * next_q
+                    target_q = rewards_tensor + (1 - dones_tensor) * self.gamma * next_q
                 
                 # Compute loss with importance sampling weights
-                loss = torch.mean(weights * (current_q - target_q) ** 2)
+                # Use huber loss for better stability
+                td_errors_tensor = current_q - target_q
+                loss = torch.mean(weights_tensor * torch.nn.functional.huber_loss(current_q, target_q, reduction='none'))
             
             # Optimize with mixed precision
             self.optimizer.zero_grad(set_to_none=True)  # More efficient than zero_grad()
@@ -454,30 +473,42 @@ class DQNAgent:
             self.scaler.step(self.optimizer)
             self.scaler.update()
             
-            # Compute TD errors for updating priorities - do this on CPU to avoid extra GPU-CPU transfer
+            # Compute TD errors for updating priorities - do this on GPU to avoid extra transfers
             with torch.no_grad():
-                td_errors = torch.abs(current_q - target_q).detach().cpu().numpy()
+                td_errors = torch.abs(td_errors_tensor).detach().cpu().numpy()
         else:
             # Standard precision training
-            # Compute current Q values
-            current_q = self.q_network(states).gather(1, actions.unsqueeze(1)).squeeze(1)
+            # Compute Q-values for both current and next states in a single forward pass
+            combined_states = torch.cat([states_tensor, next_states_tensor], dim=0)
+            combined_q_values = self.q_network(combined_states)
+            
+            # Split the results
+            batch_size = states_tensor.shape[0]
+            current_q_all = combined_q_values[:batch_size]
+            next_q_all = combined_q_values[batch_size:]
+            
+            # Gather current Q values for the actions taken
+            current_q = current_q_all.gather(1, actions_tensor.unsqueeze(1)).squeeze(1)
             
             # Compute target Q values using Double DQN
             with torch.no_grad():
-                # Get actions from current network
-                next_actions = self.q_network(next_states).argmax(1, keepdim=True)
+                # Get actions from current network (already computed above)
+                next_actions = next_q_all.argmax(1, keepdim=True)
                 
                 # Get Q-values from target network for those actions
-                next_q = self.target_network(next_states).gather(1, next_actions).squeeze(1)
+                target_q_all = self.target_network(next_states_tensor)
+                next_q = target_q_all.gather(1, next_actions).squeeze(1)
                 
                 # Compute target Q values
-                target_q = rewards + (1 - dones) * self.gamma * next_q
+                target_q = rewards_tensor + (1 - dones_tensor) * self.gamma * next_q
             
             # Compute TD errors for updating priorities
-            td_errors = torch.abs(current_q - target_q).detach().cpu().numpy()
+            td_errors_tensor = current_q - target_q
+            td_errors = torch.abs(td_errors_tensor).detach().cpu().numpy()
             
             # Compute loss with importance sampling weights
-            loss = torch.mean(weights * (current_q - target_q) ** 2)
+            # Use huber loss for better stability
+            loss = torch.mean(weights_tensor * torch.nn.functional.huber_loss(current_q, target_q, reduction='none'))
             
             # Optimize the model
             self.optimizer.zero_grad(set_to_none=True)  # More efficient than zero_grad()
@@ -494,7 +525,9 @@ class DQNAgent:
         # Update target network periodically
         self.update_counter += 1
         if self.update_counter % self.target_update == 0:
-            self.target_network.load_state_dict(self.q_network.state_dict())
+            # Use faster in-place copy for target network update
+            for target_param, param in zip(self.target_network.parameters(), self.q_network.parameters()):
+                target_param.data.copy_(param.data)
         
         # Decay epsilon
         self.epsilon = max(self.epsilon_end, self.epsilon * self.epsilon_decay)

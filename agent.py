@@ -14,37 +14,52 @@ class GolfMLP(nn.Module):
     Output: Q-values for each possible action
     """
     
-    def __init__(self, input_size: int = 60, hidden_size: int = 256, output_size: int = 9):
+    def __init__(self, input_size: int = 60, hidden_size: int = 512, output_size: int = 9):
         super(GolfMLP, self).__init__()
         
-        # Use Layer Normalization instead of Batch Normalization
-        # Layer Norm works with any batch size, including batch size of 1
+        # Deeper network with larger hidden size and different activation functions
         self.network = nn.Sequential(
+            # Input layer
             nn.Linear(input_size, hidden_size),
-            nn.LayerNorm(hidden_size),  # Replace BatchNorm with LayerNorm
-            nn.ReLU(),
+            nn.LayerNorm(hidden_size),
+            nn.LeakyReLU(0.1),  # LeakyReLU instead of ReLU for better gradient flow
             nn.Dropout(0.2),
             
+            # First hidden layer
             nn.Linear(hidden_size, hidden_size),
-            nn.LayerNorm(hidden_size),  # Replace BatchNorm with LayerNorm
-            nn.ReLU(),
+            nn.LayerNorm(hidden_size),
+            nn.LeakyReLU(0.1),
             nn.Dropout(0.2),
             
-            nn.Linear(hidden_size, hidden_size // 2),
-            nn.LayerNorm(hidden_size // 2),  # Replace BatchNorm with LayerNorm
-            nn.ReLU(),
-            nn.Dropout(0.1),
+            # Second hidden layer (new)
+            nn.Linear(hidden_size, hidden_size),
+            nn.LayerNorm(hidden_size),
+            nn.LeakyReLU(0.1),
+            nn.Dropout(0.2),
             
+            # Third hidden layer (new)
+            nn.Linear(hidden_size, hidden_size // 2),
+            nn.LayerNorm(hidden_size // 2),
+            nn.LeakyReLU(0.1),
+            nn.Dropout(0.15),
+            
+            # Fourth hidden layer (new)
+            nn.Linear(hidden_size // 2, hidden_size // 2),
+            nn.LayerNorm(hidden_size // 2),
+            nn.LeakyReLU(0.1),
+            nn.Dropout(0.15),
+            
+            # Output layer
             nn.Linear(hidden_size // 2, output_size)
         )
         
-        # Initialize weights using Xavier/Glorot initialization
+        # Initialize weights using Kaiming initialization (better for LeakyReLU)
         self._initialize_weights()
     
     def _initialize_weights(self):
         for m in self.modules():
             if isinstance(m, nn.Linear):
-                nn.init.xavier_uniform_(m.weight)
+                nn.init.kaiming_normal_(m.weight, nonlinearity='leaky_relu')
                 nn.init.constant_(m.bias, 0.01)
     
     def forward(self, x):
@@ -144,20 +159,20 @@ class DQNAgent:
     
     def __init__(
         self,
-        state_size: int = 60,  # Updated from 119 to 60 (simplified state space)
+        state_size: int = 60,  # Simplified state space (removed suits)
         action_size: int = 9,
-        hidden_size: int = 256,  # Increased hidden size
-        learning_rate: float = 0.0005,  # Lower learning rate for more stable learning
-        gamma: float = 0.99,  # Higher discount factor to value future rewards more
+        hidden_size: int = 512,  # Increased from 256 to 512
+        learning_rate: float = 0.0001,  # Reduced from 0.0005 to 0.0001 for more stable learning
+        gamma: float = 0.99,  # Discount factor
         epsilon_start: float = 1.0,
-        epsilon_end: float = 0.05,  # Lower end epsilon for more exploitation
-        epsilon_decay: float = 0.998,  # Slower decay for longer exploration
-        buffer_size: int = 50000,  # Larger buffer to store more experiences
-        batch_size: int = 128,  # Larger batch size for more stable gradients
-        target_update: int = 500,  # Less frequent target updates
-        per_alpha: float = 0.7,  # Higher alpha for more prioritization
-        per_beta: float = 0.5,   # Higher starting beta for less bias
-        per_beta_increment: float = 0.0005  # Faster beta increment
+        epsilon_end: float = 0.01,  # Reduced from 0.05 to 0.01 for more exploitation in late stages
+        epsilon_decay: float = 0.9995,  # Adjusted for slower decay
+        buffer_size: int = 100000,  # Increased from 50000 to 100000
+        batch_size: int = 256,  # Increased from 128 to 256
+        target_update: int = 1000,  # Increased from 500 to 1000
+        per_alpha: float = 0.7,  # Prioritization exponent
+        per_beta: float = 0.5,  # Importance sampling start value
+        per_beta_increment: float = 0.0001  # Beta increment per learning step
     ):
         self.state_size = state_size
         self.action_size = action_size
@@ -184,7 +199,13 @@ class DQNAgent:
         self.current_episode_rewards = 0
         
         # Networks
-        self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+        # Check for MPS (Metal Performance Shaders) support on macOS
+        if torch.backends.mps.is_available():
+            self.device = torch.device("mps")
+        elif torch.cuda.is_available():
+            self.device = torch.device("cuda")
+        else:
+            self.device = torch.device("cpu")
         self.q_network = GolfMLP(state_size, hidden_size, action_size).to(self.device)
         self.target_network = GolfMLP(state_size, hidden_size, action_size).to(self.device)
         self.target_network.load_state_dict(self.q_network.state_dict())

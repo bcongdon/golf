@@ -271,12 +271,26 @@ class GolfGame:
             min_score = min(scores)
             current_player_score = scores[self.current_player]
             
-            # Reward is positive if player has lowest score (or tied for lowest)
+            # Enhanced terminal rewards
             if current_player_score == min_score:
-                reward = 10.0
+                # Winning is highly rewarded
+                if len(self.revealed_cards[self.current_player]) == 6:
+                    # Extra reward for winning with all cards revealed
+                    reward = 15.0
+                else:
+                    reward = 10.0
+                
+                # Additional reward based on margin of victory
+                margin = sum(scores) / len(scores) - current_player_score
+                reward += 0.5 * margin  # Bigger wins are better
             else:
-                # Negative reward based on how far from winning
-                reward = -1.0 * (current_player_score - min_score)
+                # Negative reward based on how far from winning, but less punishing
+                score_diff = current_player_score - min_score
+                reward = -0.5 * score_diff
+                
+                # Less penalty if the player revealed more cards (encouraging exploration)
+                revealed_ratio = len(self.revealed_cards[self.current_player]) / 6.0
+                reward *= (1.0 - 0.3 * revealed_ratio)
             
             info["scores"] = scores
         else:
@@ -294,9 +308,9 @@ class GolfGame:
                 old_value = self._card_value(old_card)
                 new_value = self._card_value(new_card)
                 
-                # Reward for replacing a high-value card with a lower-value card
+                # Stronger reward for replacing a high-value card with a lower-value card
                 value_improvement = old_value - new_value
-                reward += 0.2 * value_improvement
+                reward += 0.5 * value_improvement  # Increased from 0.2 to 0.5
                 
                 # Check if this created a match in the column
                 col = position % 3
@@ -305,26 +319,57 @@ class GolfGame:
                 
                 # Extra reward for creating a match (same rank)
                 if new_card[1] == other_card[1]:
-                    reward += 1.0
+                    # Significantly higher reward for creating matches
+                    reward += 2.0  # Increased from 1.0 to 2.0
                     
                     # Even more reward if it's a 2 (worth -2 points)
                     if new_card[1] == 1:  # 2 is rank 1 (0-indexed)
-                        reward += 0.5
+                        reward += 1.0  # Increased from 0.5 to 1.0
                 
                 # Reward for revealing cards (encouraging exploration)
                 if position not in self.revealed_cards[self.current_player]:
-                    reward += 0.1
+                    # Higher reward for revealing cards
+                    reward += 0.3  # Increased from 0.1 to 0.3
+                    
+                    # Extra reward for revealing cards early in the game
+                    if len(self.revealed_cards[self.current_player]) < 3:
+                        reward += 0.2  # Additional reward for early exploration
+                
+                # Reward for strategic play - replacing cards in columns with high total value
+                if other_position in self.revealed_cards[self.current_player]:
+                    # If the other card in column is revealed, reward replacing high-value columns
+                    column_value = self._card_value(new_card) + self._card_value(other_card)
+                    if column_value > 10:  # If column has high value
+                        reward += 0.2  # Reward for targeting high-value columns
             
-            # Small penalty for discarding a potentially useful card
+            # Penalty for discarding a potentially useful card
             elif action == 8:
                 card_value = self._card_value(self.discard_pile[-1])
                 if card_value <= 5:  # If it's a low-value card (A, 2, 3, 4, 5)
-                    reward -= 0.1 * (6 - card_value)  # More penalty for lower values
+                    reward -= 0.2 * (6 - card_value)  # Increased penalty for discarding valuable cards
+                
+                # Additional penalty for discarding a card that could create a match
+                discarded_rank = self.discard_pile[-1][1]
+                for i in range(3):  # Check each column
+                    # Check if discarded card could match any revealed card
+                    top_pos, bottom_pos = i, i + 3
+                    if top_pos in self.revealed_cards[self.current_player]:
+                        if self.player_hands[self.current_player][top_pos][1] == discarded_rank:
+                            reward -= 0.5  # Penalty for discarding a potential match
+                    if bottom_pos in self.revealed_cards[self.current_player]:
+                        if self.player_hands[self.current_player][bottom_pos][1] == discarded_rank:
+                            reward -= 0.5  # Penalty for discarding a potential match
             
-            # Apply a small penalty proportional to the current score
+            # Apply a penalty proportional to the current score
             # This encourages the agent to keep the score low throughout the game
             current_score = self._calculate_score(self.current_player)
-            reward -= 0.01 * current_score
+            reward -= 0.02 * current_score  # Increased from 0.01 to 0.02
+            
+            # Reward for making progress in revealing cards
+            revealed_count = len(self.revealed_cards[self.current_player])
+            if revealed_count >= 4 and not self.final_round:
+                # Encourage revealing more cards as game progresses
+                reward += 0.1 * revealed_count
         
         return self._get_observation(), reward, self.game_over, info
     

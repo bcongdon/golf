@@ -30,15 +30,15 @@ def setup_logging(log_level):
 
 def parse_args():
     parser = argparse.ArgumentParser(description='Train a DQN agent to play Golf')
-    parser.add_argument('--episodes', type=int, default=10000, help='Number of episodes to train')
-    parser.add_argument('--batch-size', type=int, default=64, help='Batch size for training')
-    parser.add_argument('--hidden-size', type=int, default=128, help='Hidden size of the neural network')
-    parser.add_argument('--lr', type=float, default=0.0005, help='Learning rate')
-    parser.add_argument('--gamma', type=float, default=0.97, help='Discount factor')
+    parser.add_argument('--episodes', type=int, default=20000, help='Number of episodes to train')
+    parser.add_argument('--batch-size', type=int, default=256, help='Batch size for training')
+    parser.add_argument('--hidden-size', type=int, default=512, help='Hidden size of the neural network')
+    parser.add_argument('--lr', type=float, default=0.0001, help='Learning rate')
+    parser.add_argument('--gamma', type=float, default=0.99, help='Discount factor')
     parser.add_argument('--epsilon-start', type=float, default=1.0, help='Starting epsilon for exploration')
-    parser.add_argument('--epsilon-end', type=float, default=0.1, help='Minimum epsilon for exploration')
-    parser.add_argument('--epsilon-decay', type=float, default=0.995, help='Decay rate for epsilon')
-    parser.add_argument('--target-update', type=int, default=100, help='Target network update frequency')
+    parser.add_argument('--epsilon-end', type=float, default=0.01, help='Minimum epsilon for exploration')
+    parser.add_argument('--epsilon-decay', type=float, default=0.9995, help='Decay rate for epsilon')
+    parser.add_argument('--target-update', type=int, default=1000, help='Target network update frequency')
     parser.add_argument('--eval-interval', type=int, default=500, help='Evaluation interval')
     parser.add_argument('--save-dir', type=str, default='models', help='Directory to save models')
     parser.add_argument('--load-model', type=str, default=None, help='Path to load model from')
@@ -185,6 +185,17 @@ def train(args, logger):
         agent.load(args.load_model)
         logger.info(f"Loaded model from {args.load_model}")
     
+    # Initialize opponent pool for self-play
+    opponent_pool = []  # Will store snapshots of the agent at different training stages
+    opponent_pool_size = 5  # Maximum number of past versions to keep
+    opponent_update_frequency = 2000  # Add to pool every N episodes
+    
+    # Random opponent probability (will decrease over time)
+    random_opponent_prob = 0.7  # Start with high probability of random opponent
+    random_opponent_decay = 0.9999  # Decay factor
+    
+    logger.info(f"Initialized opponent pool with size {opponent_pool_size} and update frequency {opponent_update_frequency}")
+    
     # Training loop
     rewards = []
     losses = []
@@ -269,9 +280,32 @@ def train(args, logger):
                 state = next_state
                 episode_reward += reward
             else:
-                # Opponent's turn - use the same agent but with higher exploration
-                # This introduces diversity while still using learned knowledge
-                opponent_action = agent.select_action(state, valid_actions, training=True)
+                # Opponent's turn - use a mix of strategies
+                # 1. Random opponent (probability decreases over time)
+                # 2. Past versions of the agent from the pool
+                # 3. Current agent with high exploration
+                
+                # Determine opponent type
+                if random.random() < random_opponent_prob:
+                    # Use random opponent
+                    opponent_action = random.choice(valid_actions)
+                elif opponent_pool and random.random() < 0.7:  # 70% chance to use pool when available
+                    # Use an agent from the opponent pool
+                    opponent_idx = random.randint(0, len(opponent_pool) - 1)
+                    opponent_agent = opponent_pool[opponent_idx]
+                    # Set to evaluation mode for inference
+                    opponent_agent.q_network.eval()
+                    with torch.no_grad():
+                        opponent_action = opponent_agent.select_action(state, valid_actions, training=False)
+                else:
+                    # Use current agent with high exploration
+                    # Temporarily increase epsilon for more exploration
+                    original_epsilon = agent.epsilon
+                    agent.epsilon = max(0.3, agent.epsilon)  # At least 30% exploration
+                    opponent_action = agent.select_action(state, valid_actions, training=True)
+                    agent.epsilon = original_epsilon  # Restore original epsilon
+                
+                # Take the action
                 _, _, done, info = env.step(opponent_action)
                 # No learning from opponent's experiences
             
@@ -280,6 +314,24 @@ def train(args, logger):
             # Check if max turns was reached
             if done and "max_turns_reached" in info and info["max_turns_reached"]:
                 max_turns_reached = True
+        
+        # Add current agent to opponent pool periodically
+        if (episode + 1) % opponent_update_frequency == 0:
+            # Create a deep copy of the current agent
+            import copy
+            opponent_snapshot = copy.deepcopy(agent)
+            
+            # Add to pool, maintaining maximum size
+            opponent_pool.append(opponent_snapshot)
+            if len(opponent_pool) > opponent_pool_size:
+                # Remove oldest snapshot
+                opponent_pool.pop(0)
+            
+            logger.info(f"Added agent snapshot to opponent pool (size: {len(opponent_pool)})")
+            
+            # Decay random opponent probability
+            random_opponent_prob *= random_opponent_decay
+            logger.info(f"Random opponent probability decayed to {random_opponent_prob:.4f}")
         
         # Record metrics
         rewards.append(episode_reward)
@@ -299,14 +351,25 @@ def train(args, logger):
             
         # Ensure epsilon decays even if learning doesn't happen often enough
         # Use a more gradual decay formula to stretch it over more episodes
-        # This will decay from 1.0 to 0.1 over approximately 5000 episodes
+        # This will decay from 1.0 to 0.01 over approximately 10000 episodes
         # Formula: epsilon = epsilon_end + (epsilon_start - epsilon_end) * exp(-decay_rate * episode)
-        decay_rate = 0.0005  # Adjusted for ~5000 episodes decay
+        decay_rate = 0.0003  # Adjusted for ~10000 episodes decay (slower)
         episode_fraction = (episode + 1) / args.episodes
         agent.epsilon = max(
             agent.epsilon_end,
             agent.epsilon_end + (args.epsilon_start - agent.epsilon_end) * np.exp(-decay_rate * (episode + 1))
         )
+        
+        # Implement learning rate annealing
+        # Gradually reduce learning rate as training progresses
+        if (episode + 1) % 1000 == 0 and episode > 0:
+            # Reduce learning rate by 5% every 1000 episodes
+            for param_group in agent.optimizer.param_groups:
+                param_group['lr'] = max(1e-5, param_group['lr'] * 0.95)
+                current_lr = param_group['lr']
+                logger.info(f"Learning rate annealed to {current_lr:.6f}")
+                lr_history.append(current_lr)
+                lr_history_episodes.append(episode)
         
         # Log progress periodically
         if (episode + 1) % 100 == 0:

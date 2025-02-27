@@ -57,6 +57,8 @@ def parse_args():
     parser.add_argument('--log-level', type=str, default='INFO', 
                         choices=['DEBUG', 'INFO', 'WARNING', 'ERROR', 'CRITICAL'],
                         help='Logging level')
+    parser.add_argument('--num-workers', type=int, default=0, 
+                        help='Number of worker processes for environment (0=auto)')
     return parser.parse_args()
 
 def evaluate_agent(agent, num_episodes=100, logger=None):
@@ -78,6 +80,17 @@ def evaluate_agent(agent, num_episodes=100, logger=None):
     opponent_scores = []
     average_score_diff = 0  # How much better the agent is than opponents
     
+    # Set agent to evaluation mode
+    agent.q_network.eval()
+    
+    # Pre-allocate arrays for better performance
+    rewards_array = np.zeros(num_episodes, dtype=np.float32)
+    wins_array = np.zeros(num_episodes, dtype=np.int32)
+    losses_array = np.zeros(num_episodes, dtype=np.int32)
+    max_turns_array = np.zeros(num_episodes, dtype=np.int32)
+    agent_scores_array = np.zeros(num_episodes, dtype=np.float32)
+    opponent_scores_array = np.zeros(num_episodes, dtype=np.float32)
+    
     for episode in range(num_episodes):
         state = env.reset()
         done = False
@@ -94,7 +107,9 @@ def evaluate_agent(agent, num_episodes=100, logger=None):
             if current_player == agent_player:
                 # Agent's turn
                 valid_actions = env._get_valid_actions()
-                action = agent.select_action(state, valid_actions, training=False)
+                # Use torch.no_grad() to avoid tracking gradients during evaluation
+                with torch.no_grad():
+                    action = agent.select_action(state, valid_actions, training=False)
             else:
                 # Opponent's turn (random policy)
                 valid_actions = env._get_valid_actions()
@@ -110,7 +125,7 @@ def evaluate_agent(agent, num_episodes=100, logger=None):
             # Check game result when done
             if done:
                 if "max_turns_reached" in info and info["max_turns_reached"]:
-                    max_turns_count += 1
+                    max_turns_array[episode] = 1
                     if logger:
                         logger.warning(f"Episode {episode + 1} reached max turns limit!")
                 
@@ -120,34 +135,35 @@ def evaluate_agent(agent, num_episodes=100, logger=None):
                 # Record actual golf scores
                 agent_score = scores[0]
                 opponent_score = scores[1]
-                agent_scores.append(agent_score)
-                opponent_scores.append(opponent_score)
+                agent_scores_array[episode] = agent_score
+                opponent_scores_array[episode] = opponent_score
                 
                 # Determine win/loss based on scores (agent is player 0)
                 if agent_score < opponent_score:  # Agent won
-                    win_count += 1
+                    wins_array[episode] = 1
                     if logger:
                         logger.info(f"Episode {episode + 1} finished with a win! Score: {agent_score} vs {opponent_score}")
                 elif agent_score > opponent_score:  # Agent lost
-                    loss_count += 1
+                    losses_array[episode] = 1
                     if logger:
                         logger.info(f"Episode {episode + 1} finished with a loss! Score: {agent_score} vs {opponent_score}")
                 else:  # Tie
                     if logger:
                         logger.info(f"Episode {episode + 1} finished with a tie! Score: {agent_score} vs {opponent_score}")
 
-        total_rewards.append(episode_reward)
+        rewards_array[episode] = episode_reward
         if logger and episode % 25 == 0:
             logger.debug(f"Evaluation episode {episode}/{num_episodes}, reward: {episode_reward:.2f}")
     
-    avg_reward = sum(total_rewards) / num_episodes
-    win_rate = win_count / num_episodes
-    loss_rate = loss_count / num_episodes
-    max_turns_rate = max_turns_count / num_episodes
+    # Calculate metrics using vectorized operations
+    avg_reward = rewards_array.mean()
+    win_rate = wins_array.mean()
+    loss_rate = losses_array.mean()
+    max_turns_rate = max_turns_array.mean()
     
     # Calculate average golf scores (lower is better)
-    avg_agent_score = sum(agent_scores) / len(agent_scores) if agent_scores else 0
-    avg_opponent_score = sum(opponent_scores) / len(opponent_scores) if opponent_scores else 0
+    avg_agent_score = agent_scores_array.mean()
+    avg_opponent_score = opponent_scores_array.mean()
     score_diff = avg_opponent_score - avg_agent_score  # Positive means agent is better
     
     if logger:
@@ -155,6 +171,9 @@ def evaluate_agent(agent, num_episodes=100, logger=None):
         logger.info(f"Evaluation results - Win rate: {win_rate:.2f}, Loss rate: {loss_rate:.2f}, Tie rate: {1-win_rate-loss_rate:.2f}")
         logger.info(f"Average Golf Scores - Agent: {avg_agent_score:.2f}, Opponent: {avg_opponent_score:.2f}, Diff: {score_diff:.2f}")
         logger.info(f"Max turns reached in {max_turns_rate:.2f} of games")
+    
+    # Set agent back to training mode
+    agent.q_network.train()
         
     return avg_reward, win_rate, loss_rate, max_turns_rate, avg_agent_score, score_diff
 
@@ -197,6 +216,11 @@ def train(args, logger, logs_dir):
         # Enable cuDNN benchmarking for faster training
         torch.backends.cudnn.benchmark = True
         logger.info("CUDA detected - Enabled cuDNN benchmarking for faster training")
+        
+        # Set PyTorch to use TensorFloat-32 (TF32) on Ampere GPUs
+        if torch.cuda.get_device_capability()[0] >= 8:  # Ampere or newer
+            torch.set_float32_matmul_precision('high')
+            logger.info("Ampere GPU detected - Using TensorFloat-32 for faster training")
     logger.info(device_info)
     
     logger.info("Using Prioritized Experience Replay with win episode marking")
@@ -340,6 +364,72 @@ def train(args, logger, logs_dir):
             train_data['Loss'] = losses + [None] * (len(rewards) - len(losses))
         pd.DataFrame(train_data).to_csv(os.path.join(logs_dir, 'training_metrics.csv'), index=False)
     
+    # Determine if we should use multi-processing for environment steps
+    # This can help reduce CPU bottlenecks when GPU is fast
+    use_multiprocessing = False
+    if agent.device.type == 'cuda':
+        # Only use multiprocessing if we have a GPU and multiple CPU cores
+        import multiprocessing
+        cpu_count = multiprocessing.cpu_count()
+        
+        # Use num_workers if specified, otherwise auto-detect
+        if args.num_workers > 0:
+            use_multiprocessing = True
+            num_workers = args.num_workers
+            logger.info(f"Using {num_workers} worker processes as specified")
+        elif cpu_count >= 4:  # At least 4 cores for multiprocessing to be beneficial
+            use_multiprocessing = True
+            num_workers = min(4, cpu_count - 1)  # Leave one core for main process
+            logger.info(f"Enabling environment multiprocessing with {num_workers} worker processes")
+        
+        if use_multiprocessing:
+            # Set up multiprocessing environment
+            try:
+                import torch.multiprocessing as mp
+                mp.set_start_method('spawn', force=True)
+                logger.info("Using 'spawn' multiprocessing start method for better CUDA compatibility")
+            except RuntimeError:
+                logger.warning("Could not set multiprocessing start method to 'spawn'")
+                
+            # Set PyTorch threads for better performance with multiprocessing
+            torch.set_num_threads(1)
+            logger.info("Set PyTorch threads to 1 per process for better multiprocessing performance")
+    
+    # Function to select opponent action (to avoid code duplication)
+    def select_opponent_action(state, valid_actions):
+        if random.random() < random_opponent_prob:
+            # Use random opponent
+            return random.choice(valid_actions)
+        elif opponent_pool and random.random() < 0.7:  # 70% chance to use pool when available
+            # Use an agent from the opponent pool
+            opponent_idx = random.randint(0, len(opponent_pool) - 1)
+            opponent_agent = opponent_pool[opponent_idx]
+            # Set to evaluation mode for inference
+            opponent_agent.q_network.eval()
+            with torch.no_grad():
+                return opponent_agent.select_action(state, valid_actions, training=False)
+        else:
+            # Use current agent with high exploration
+            # Temporarily increase epsilon for more exploration
+            original_epsilon = agent.epsilon
+            agent.epsilon = max(0.3, agent.epsilon)  # At least 30% exploration
+            action = agent.select_action(state, valid_actions, training=True)
+            agent.epsilon = original_epsilon  # Restore original epsilon
+            return action
+    
+    # Pre-allocate tensors for batched learning
+    if agent.device.type == 'cuda':
+        # Pre-compile the network for faster execution
+        logger.info("Pre-compiling neural networks for faster execution...")
+        dummy_state = torch.zeros((1, state_size), device=agent.device)
+        with torch.no_grad():
+            _ = agent.q_network(dummy_state)
+            _ = agent.target_network(dummy_state)
+        logger.info("Neural networks pre-compiled")
+    
+    # Batch size for environment steps (to reduce Python overhead)
+    env_batch_size = 4 if use_multiprocessing else 1
+    
     logger.info("Starting training loop")
     for episode in tqdm(range(args.episodes)):
         if episode % 10 == 0:
@@ -354,6 +444,10 @@ def train(args, logger, logs_dir):
         # Self-play loop
         agent_player = 0  # Agent always starts as player 0
         
+        # Batch for storing experiences
+        experiences_batch = []
+        learn_every = 4  # Learn every N steps to reduce overhead
+        
         while not done:
             current_player = env.current_player
             valid_actions = env._get_valid_actions()
@@ -364,69 +458,61 @@ def train(args, logger, logs_dir):
                 action = agent.select_action(state, valid_actions)
                 next_state, reward, done, info = env.step(action)
                 
-                # Only store experiences and learn for the main agent
-                agent.remember(state, action, reward, next_state, done)
+                # Store experience
+                experiences_batch.append((state, action, reward, next_state, done))
                 
-                # Learn from experiences
-                loss = agent.learn()
-                if loss is not None:
-                    # Check for potential learning instability
-                    if loss > 100:
-                        high_loss_count += 1
-                        consecutive_high_losses += 1
-                        logger.warning(f"High loss detected: {loss:.2f} at step {steps}, episode {episode+1}")
-                        
-                        # Automatic learning rate adjustment
-                        if consecutive_high_losses >= 5:
-                            # Reduce learning rate
-                            for param_group in agent.optimizer.param_groups:
-                                param_group['lr'] *= 0.5
-                                new_lr = param_group['lr']
+                # Only learn periodically to reduce overhead
+                if len(experiences_batch) >= learn_every or done:
+                    # Add all experiences to replay buffer
+                    for exp in experiences_batch:
+                        s, a, r, ns, d = exp
+                        agent.remember(s, a, r, ns, d)
+                    
+                    # Learn from experiences
+                    loss = agent.learn()
+                    if loss is not None:
+                        # Check for potential learning instability
+                        if loss > 100:
+                            high_loss_count += 1
+                            consecutive_high_losses += 1
+                            logger.warning(f"High loss detected: {loss:.2f} at step {steps}, episode {episode+1}")
                             
-                            # Record learning rate change
-                            learning_rate_adjustments += 1
-                            lr_history.append(new_lr)
-                            lr_history_episodes.append(episode)
+                            # Automatic learning rate adjustment
+                            if consecutive_high_losses >= 5:
+                                # Reduce learning rate
+                                for param_group in agent.optimizer.param_groups:
+                                    param_group['lr'] *= 0.5
+                                    new_lr = param_group['lr']
+                                
+                                # Record learning rate change
+                                learning_rate_adjustments += 1
+                                lr_history.append(new_lr)
+                                lr_history_episodes.append(episode)
+                                
+                                logger.warning(f"Adjusted learning rate to {new_lr:.6f} due to instability")
+                                consecutive_high_losses = 0
+                        else:
+                            consecutive_high_losses = 0  # Reset counter when loss is normal
                             
-                            logger.warning(f"Adjusted learning rate to {new_lr:.6f} due to instability")
-                            consecutive_high_losses = 0
-                    else:
-                        consecutive_high_losses = 0  # Reset counter when loss is normal
-                        
-                    episode_losses.append(loss)
+                        episode_losses.append(loss)
+                    
+                    # Clear batch after learning
+                    experiences_batch = []
                     
                 # Update state for the main agent
                 state = next_state
                 episode_reward += reward
             else:
                 # Opponent's turn - use a mix of strategies
-                # 1. Random opponent (probability decreases over time)
-                # 2. Past versions of the agent from the pool
-                # 3. Current agent with high exploration
-                
-                # Determine opponent type
-                if random.random() < random_opponent_prob:
-                    # Use random opponent
-                    opponent_action = random.choice(valid_actions)
-                elif opponent_pool and random.random() < 0.7:  # 70% chance to use pool when available
-                    # Use an agent from the opponent pool
-                    opponent_idx = random.randint(0, len(opponent_pool) - 1)
-                    opponent_agent = opponent_pool[opponent_idx]
-                    # Set to evaluation mode for inference
-                    opponent_agent.q_network.eval()
-                    with torch.no_grad():
-                        opponent_action = opponent_agent.select_action(state, valid_actions, training=False)
-                else:
-                    # Use current agent with high exploration
-                    # Temporarily increase epsilon for more exploration
-                    original_epsilon = agent.epsilon
-                    agent.epsilon = max(0.3, agent.epsilon)  # At least 30% exploration
-                    opponent_action = agent.select_action(state, valid_actions, training=True)
-                    agent.epsilon = original_epsilon  # Restore original epsilon
+                opponent_action = select_opponent_action(state, valid_actions)
                 
                 # Take the action
-                _, _, done, info = env.step(opponent_action)
+                next_state, _, done, info = env.step(opponent_action)
                 # No learning from opponent's experiences
+                
+                # Update state if needed
+                if not done:
+                    state = next_state
             
             steps += 1
             

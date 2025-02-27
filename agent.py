@@ -79,7 +79,8 @@ class GolfMLP(nn.Module):
 
 class PrioritizedReplayBuffer:
     """
-    Prioritized experience replay buffer with episode marking for winning trajectories.
+    Optimized Prioritized experience replay buffer with episode marking for winning trajectories.
+    Uses vectorized operations for better performance.
     """
     
     def __init__(self, capacity: int = 10000, alpha: float = 0.6, beta: float = 0.4, beta_increment: float = 0.001):
@@ -98,6 +99,28 @@ class PrioritizedReplayBuffer:
         # Episode tracking
         self.current_episode = []  # Temporarily stores the current episode
         self.win_multiplier = 2.0  # Priority multiplier for winning episodes
+        
+        # Pre-allocate arrays for better performance
+        self._states = None
+        self._actions = None
+        self._rewards = None
+        self._next_states = None
+        self._dones = None
+        self._initialized = False
+        
+        # Use a more efficient data structure for sampling
+        self._segment_tree_sum = None
+        self._segment_tree_min = None
+    
+    def _initialize_arrays(self, state_shape):
+        """Initialize arrays based on first experience."""
+        if not self._initialized:
+            self._states = np.zeros((self.capacity,) + state_shape, dtype=np.float32)
+            self._next_states = np.zeros((self.capacity,) + state_shape, dtype=np.float32)
+            self._actions = np.zeros(self.capacity, dtype=np.int64)
+            self._rewards = np.zeros(self.capacity, dtype=np.float32)
+            self._dones = np.zeros(self.capacity, dtype=np.bool_)
+            self._initialized = True
     
     def add(self, state, action, reward, next_state, done, win=False):
         """Add a new experience to the buffer."""
@@ -111,16 +134,36 @@ class PrioritizedReplayBuffer:
             
             # Add all transitions from the episode to the buffer with appropriate priority
             for exp in self.current_episode:
+                state, action, reward, next_state, done = exp
+                
+                # Initialize arrays if needed
+                if not self._initialized and state is not None:
+                    self._initialize_arrays(np.array(state).shape)
+                
                 # Create an experience with max priority
                 priority = self.max_priority * priority_multiplier
                 
                 # Add to buffer
                 if self.size < self.capacity:
-                    self.buffer.append(exp)
+                    if self._initialized:
+                        self._states[self.size] = state
+                        self._actions[self.size] = action
+                        self._rewards[self.size] = reward
+                        self._next_states[self.size] = next_state
+                        self._dones[self.size] = done
+                    else:
+                        self.buffer.append(exp)
                     self.priorities[self.size] = priority
                     self.size += 1
                 else:
-                    self.buffer[self.position] = exp
+                    if self._initialized:
+                        self._states[self.position] = state
+                        self._actions[self.position] = action
+                        self._rewards[self.position] = reward
+                        self._next_states[self.position] = next_state
+                        self._dones[self.position] = done
+                    else:
+                        self.buffer[self.position] = exp
                     self.priorities[self.position] = priority
                     self.position = (self.position + 1) % self.capacity
             
@@ -128,14 +171,14 @@ class PrioritizedReplayBuffer:
             self.current_episode = []
     
     def sample(self, batch_size: int) -> Tuple[List, List[int], np.ndarray]:
-        """Sample a batch of experiences based on priorities."""
+        """Sample a batch of experiences based on priorities using vectorized operations."""
         if self.size == 0:
             return [], [], np.array([])
         
         # Update beta for importance sampling
         self.beta = min(1.0, self.beta + self.beta_increment)
         
-        # Calculate sampling probabilities
+        # Calculate sampling probabilities (vectorized)
         priorities = self.priorities[:self.size]
         probabilities = priorities ** self.alpha
         probabilities /= probabilities.sum()
@@ -143,21 +186,34 @@ class PrioritizedReplayBuffer:
         # Sample indices based on probabilities
         indices = np.random.choice(self.size, min(batch_size, self.size), p=probabilities, replace=False)
         
-        # Calculate importance sampling weights
+        # Calculate importance sampling weights (vectorized)
         weights = (self.size * probabilities[indices]) ** (-self.beta)
         weights /= weights.max()  # Normalize weights
         
         # Get sampled experiences
-        experiences = [self.buffer[idx] for idx in indices]
+        if self._initialized:
+            # Use pre-allocated arrays for faster access
+            states = self._states[indices]
+            actions = self._actions[indices]
+            rewards = self._rewards[indices]
+            next_states = self._next_states[indices]
+            dones = self._dones[indices]
+            experiences = list(zip(states, actions, rewards, next_states, dones))
+        else:
+            experiences = [self.buffer[idx] for idx in indices]
         
         return experiences, indices, weights
     
     def update_priorities(self, indices: List[int], td_errors: np.ndarray):
-        """Update priorities based on TD errors."""
-        for idx, td_error in zip(indices, td_errors):
-            priority = abs(td_error) + 1e-5  # Add small epsilon to ensure non-zero priority
-            self.priorities[idx] = priority
-            self.max_priority = max(self.max_priority, priority)
+        """Update priorities based on TD errors using vectorized operations."""
+        # Add small epsilon to ensure non-zero priority (vectorized)
+        new_priorities = np.abs(td_errors) + 1e-5
+        
+        # Update priorities
+        self.priorities[indices] = new_priorities
+        
+        # Update max priority
+        self.max_priority = max(self.max_priority, new_priorities.max())
     
     def __len__(self) -> int:
         return self.size
@@ -338,16 +394,34 @@ class DQNAgent:
         
         if not batch:  # Empty batch check
             return None
-            
-        states, actions, rewards, next_states, dones = zip(*batch)
         
-        # Convert to tensors
-        states = torch.FloatTensor(np.array(states)).to(self.device)
-        actions = torch.LongTensor(np.array(actions)).to(self.device)
-        rewards = torch.FloatTensor(np.array(rewards)).to(self.device)
-        next_states = torch.FloatTensor(np.array(next_states)).to(self.device)
-        dones = torch.FloatTensor(np.array(dones)).to(self.device)
-        weights = torch.FloatTensor(weights).to(self.device)  # Importance sampling weights
+        # Convert to tensors - optimize for pre-allocated arrays
+        if hasattr(self.memory, '_initialized') and self.memory._initialized:
+            # Data is already in numpy arrays, just convert to tensors
+            states, actions, rewards, next_states, dones = zip(*batch)
+            states = torch.FloatTensor(states).to(self.device, non_blocking=True)
+            actions = torch.LongTensor(actions).to(self.device, non_blocking=True)
+            rewards = torch.FloatTensor(rewards).to(self.device, non_blocking=True)
+            next_states = torch.FloatTensor(next_states).to(self.device, non_blocking=True)
+            dones = torch.FloatTensor(dones).to(self.device, non_blocking=True)
+        else:
+            # Need to convert from list of tuples
+            states, actions, rewards, next_states, dones = zip(*batch)
+            # Pre-allocate numpy arrays for faster conversion
+            states_np = np.array(states, dtype=np.float32)
+            actions_np = np.array(actions, dtype=np.int64)
+            rewards_np = np.array(rewards, dtype=np.float32)
+            next_states_np = np.array(next_states, dtype=np.float32)
+            dones_np = np.array(dones, dtype=np.float32)
+            
+            # Convert to tensors with non_blocking=True for asynchronous transfer
+            states = torch.from_numpy(states_np).to(self.device, non_blocking=True)
+            actions = torch.from_numpy(actions_np).to(self.device, non_blocking=True)
+            rewards = torch.from_numpy(rewards_np).to(self.device, non_blocking=True)
+            next_states = torch.from_numpy(next_states_np).to(self.device, non_blocking=True)
+            dones = torch.from_numpy(dones_np).to(self.device, non_blocking=True)
+        
+        weights = torch.FloatTensor(weights).to(self.device, non_blocking=True)  # Importance sampling weights
         
         # Compute current Q values and target Q values using mixed precision when available
         if self.use_amp:
@@ -370,7 +444,7 @@ class DQNAgent:
                 loss = torch.mean(weights * (current_q - target_q) ** 2)
             
             # Optimize with mixed precision
-            self.optimizer.zero_grad()
+            self.optimizer.zero_grad(set_to_none=True)  # More efficient than zero_grad()
             self.scaler.scale(loss).backward()
             
             # Gradient clipping to prevent exploding gradients
@@ -379,6 +453,10 @@ class DQNAgent:
             
             self.scaler.step(self.optimizer)
             self.scaler.update()
+            
+            # Compute TD errors for updating priorities - do this on CPU to avoid extra GPU-CPU transfer
+            with torch.no_grad():
+                td_errors = torch.abs(current_q - target_q).detach().cpu().numpy()
         else:
             # Standard precision training
             # Compute current Q values
@@ -398,20 +476,20 @@ class DQNAgent:
             # Compute TD errors for updating priorities
             td_errors = torch.abs(current_q - target_q).detach().cpu().numpy()
             
-            # Update priorities in replay buffer
-            self.memory.update_priorities(indices, td_errors)
-            
             # Compute loss with importance sampling weights
             loss = torch.mean(weights * (current_q - target_q) ** 2)
             
             # Optimize the model
-            self.optimizer.zero_grad()
+            self.optimizer.zero_grad(set_to_none=True)  # More efficient than zero_grad()
             loss.backward()
             
             # Gradient clipping to prevent exploding gradients
             torch.nn.utils.clip_grad_norm_(self.q_network.parameters(), 1.0)
             
             self.optimizer.step()
+        
+        # Update priorities in replay buffer
+        self.memory.update_priorities(indices, td_errors)
         
         # Update target network periodically
         self.update_counter += 1

@@ -5991,3 +5991,136 @@ ValueError: Expected more than 1 value per channel when training, got input size
 2025-02-27 06:04:17,815 - golf-ai - INFO - Epsilon=0.5373 (Current)
 2025-02-27 06:04:17,815 - golf-ai - INFO - Stats: Win Rate=0.40, Avg Steps=41.4, Max Turns Rate=0.01
 2025-02-27 06:04:17,815 - golf-ai - INFO - Stability: High Losses=0
+2025-02-27 06:05:10,828 - golf-ai - INFO - Episode 2200: Reward=3.74, Avg Loss=0.3066
+2025-02-27 06:05:10,830 - golf-ai - INFO - Epsilon=0.5217 (Current)
+2025-02-27 06:05:10,830 - golf-ai - INFO - Stats: Win Rate=0.40, Avg Steps=41.7, Max Turns Rate=0.01
+2025-02-27 06:05:10,830 - golf-ai - INFO - Stability: High Losses=0
+2025-02-27 06:06:04,028 - golf-ai - INFO - Episode 2300: Reward=8.20, Avg Loss=0.3382
+2025-02-27 06:06:04,029 - golf-ai - INFO - Epsilon=0.5066 (Current)
+2025-02-27 06:06:04,029 - golf-ai - INFO - Stats: Win Rate=0.40, Avg Steps=42.0, Max Turns Rate=0.01
+2025-02-27 06:06:04,029 - golf-ai - INFO - Stability: High Losses=0
+2025-02-27 06:06:57,344 - golf-ai - INFO - Episode 2400: Reward=-26.78, Avg Loss=0.4907
+2025-02-27 06:06:57,345 - golf-ai - INFO - Epsilon=0.4919 (Current)
+2025-02-27 06:06:57,345 - golf-ai - INFO - Stats: Win Rate=0.40, Avg Steps=42.3, Max Turns Rate=0.01
+2025-02-27 06:06:57,345 - golf-ai - INFO - Stability: High Losses=0
+2025-02-27 06:07:52,704 - golf-ai - INFO - Episode 2500: Reward=-3.28, Avg Loss=0.4612
+2025-02-27 06:07:52,706 - golf-ai - INFO - Epsilon=0.4776 (Current)
+2025-02-27 06:07:52,706 - golf-ai - INFO - Stats: Win Rate=0.40, Avg Steps=42.4, Max Turns Rate=0.01
+2025-02-27 06:07:52,706 - golf-ai - INFO - Stability: High Losses=0
+2025-02-27 06:07:52,737 - golf-ai - INFO - Episode 1 finished with a win! Score: 27 vs 32
+2025-02-27 06:07:52,775 - golf-ai - INFO - Episode 2 finished with a loss! Score: 39 vs 20
+2025-02-27 06:07:52,801 - golf-ai - INFO - Episode 3 finished with a win! Score: 32 vs 37
+2025-02-27 06:07:52,827 - golf-ai - INFO - Episode 4 finished with a win! Score: 31 vs 45
+2025-02-27 06:07:52,878 - golf-ai - INFO - Episode 5 finished with a loss! Score: 35 vs 30
+2025-02-27 06:07:52,937 - golf-ai - INFO - Episode 6 finished with a loss! Score: 37 vs 27
+2025-02-27 06:07:52,995 - golf-ai - INFO - Episode 7 finished with a tie! Score: 29 vs 29
+2025-02-27 06:07:53,063 - golf-ai - INFO - Episode 8 finished with a win! Score: 34 vs 45
+2025-02-27 06:07:53,100 - golf-ai - INFO - Episode 9 finished with a win! Score: 40 vs 42
+2025-02-27 06:07:53,122 - golf-ai - INFO - Episode 10 finished with a win! Score: 34 vs 41
+2025-02-27 06:07:53,168 - golf-ai - INFO - Episode 11 finished with a loss! Score: 35 vs 29
+2025-02-27 06:07:53,201 - golf-ai - INFO - Episode 12 finished with a win! Score: 19 vs 36
+2025-02-27 06:07:53,242 - golf-ai - INFO - Episode 13 finished with a win! Score: 43 vs 51
+2025-02-27 06:07:53,327 - golf-ai - WARNING - Episode 14 reached max turns limit!
+2025-02-27 06:07:53,327 - golf-ai - INFO - Episode 14 finished with a tie! Score: 0 vs 0
+2025-02-27 06:07:53,364 - golf-ai - INFO - Episode 15 finished with a loss! Score: 46 vs 25
+2025-02-27 06:07:53,397 - golf-ai - INFO - Episode 16 finished with a loss! Score: 47 vs 39
+2025-02-27 06:07:53,447 - golf-ai - INFO - Episode 17 finished with a loss! Score: 36 vs 24
+2025-02-27 06:07:53,474 - golf-ai - INFO - Episode 18 finished with a win! Score: 20 vs 47
+2025-02-27 06:07:53,515 - golf-ai - INFO - Episode 19 finished with a win! Score: 29 vs 48
+2025-02-27 06:07:53,538 - golf-ai - INFO - Episode 20 finished with a loss! Score: 42 vs 24
+2025-02-27 06:07:53,555 - golf-ai - INFO - Episode 21 finished with a loss! Score: 43 vs 42
+2025-02-27 06:07:53,618 - golf-ai - INFO - Episode 22 finished with a loss! Score: 49 vs 48
+2025-02-27 06:07:53,641 - golf-ai - INFO - Episode 23 finished with a loss! Score: 44 vs 39
+2025-02-27 06:07:53,689 - golf-ai - INFO - Episode 24 finished with a loss! Score: 49 vs 24
+2025-02-27 06:07:53,731 - golf-ai - INFO - Episode 25 finished with a win! Score: 28 vs 40
+2025-02-27 06:07:53,774 - golf-ai - INFO - Episode 26 finished with a win! Score: 32 vs 39
+2025-02-27 06:07:53,842 - golf-ai - INFO - Episode 27 finished with a win! Score: 38 vs 40
+2025-02-27 06:07:53,899 - golf-ai - INFO - Episode 28 finished with a win! Score: 38 vs 42
+2025-02-27 06:07:53,982 - golf-ai - INFO - Episode 29 finished with a win! Score: 31 vs 37
+2025-02-27 06:07:54,041 - golf-ai - INFO - Episode 30 finished with a loss! Score: 31 vs 29
+2025-02-27 06:07:54,063 - golf-ai - INFO - Episode 31 finished with a win! Score: 33 vs 36
+2025-02-27 06:07:54,094 - golf-ai - INFO - Episode 32 finished with a loss! Score: 31 vs 14
+2025-02-27 06:07:54,129 - golf-ai - INFO - Episode 33 finished with a win! Score: 26 vs 43
+2025-02-27 06:07:54,171 - golf-ai - INFO - Episode 34 finished with a win! Score: 39 vs 46
+2025-02-27 06:07:54,224 - golf-ai - INFO - Episode 35 finished with a loss! Score: 16 vs 12
+2025-02-27 06:07:54,283 - golf-ai - INFO - Episode 36 finished with a win! Score: 34 vs 35
+2025-02-27 06:07:54,330 - golf-ai - INFO - Episode 37 finished with a win! Score: 30 vs 42
+2025-02-27 06:07:54,401 - golf-ai - INFO - Episode 38 finished with a win! Score: 33 vs 41
+2025-02-27 06:07:54,451 - golf-ai - INFO - Episode 39 finished with a win! Score: 19 vs 33
+2025-02-27 06:07:54,487 - golf-ai - INFO - Episode 40 finished with a loss! Score: 41 vs 33
+2025-02-27 06:07:54,512 - golf-ai - INFO - Episode 41 finished with a loss! Score: 51 vs 33
+2025-02-27 06:07:54,548 - golf-ai - INFO - Episode 42 finished with a win! Score: 26 vs 40
+2025-02-27 06:07:54,598 - golf-ai - INFO - Episode 43 finished with a win! Score: 26 vs 45
+2025-02-27 06:07:54,656 - golf-ai - INFO - Episode 44 finished with a win! Score: 32 vs 46
+2025-02-27 06:07:54,729 - golf-ai - INFO - Episode 45 finished with a win! Score: 30 vs 48
+2025-02-27 06:07:54,761 - golf-ai - INFO - Episode 46 finished with a win! Score: 32 vs 39
+2025-02-27 06:07:54,797 - golf-ai - INFO - Episode 47 finished with a loss! Score: 41 vs 30
+2025-02-27 06:07:54,813 - golf-ai - INFO - Episode 48 finished with a win! Score: 30 vs 48
+2025-02-27 06:07:54,857 - golf-ai - INFO - Episode 49 finished with a loss! Score: 39 vs 26
+2025-02-27 06:07:54,896 - golf-ai - INFO - Episode 50 finished with a loss! Score: 54 vs 34
+2025-02-27 06:07:54,917 - golf-ai - INFO - Episode 51 finished with a loss! Score: 41 vs 36
+2025-02-27 06:07:54,975 - golf-ai - INFO - Episode 52 finished with a win! Score: 36 vs 40
+2025-02-27 06:07:55,008 - golf-ai - INFO - Episode 53 finished with a loss! Score: 34 vs 27
+2025-02-27 06:07:55,030 - golf-ai - INFO - Episode 54 finished with a loss! Score: 50 vs 30
+2025-02-27 06:07:55,047 - golf-ai - INFO - Episode 55 finished with a win! Score: 32 vs 41
+2025-02-27 06:07:55,084 - golf-ai - INFO - Episode 56 finished with a loss! Score: 30 vs 29
+2025-02-27 06:07:55,139 - golf-ai - INFO - Episode 57 finished with a win! Score: 31 vs 39
+2025-02-27 06:07:55,225 - golf-ai - WARNING - Episode 58 reached max turns limit!
+2025-02-27 06:07:55,225 - golf-ai - INFO - Episode 58 finished with a tie! Score: 0 vs 0
+2025-02-27 06:07:55,245 - golf-ai - INFO - Episode 59 finished with a loss! Score: 31 vs 29
+2025-02-27 06:07:55,265 - golf-ai - INFO - Episode 60 finished with a loss! Score: 43 vs 42
+2025-02-27 06:07:55,337 - golf-ai - INFO - Episode 61 finished with a win! Score: 27 vs 28
+2025-02-27 06:07:55,371 - golf-ai - INFO - Episode 62 finished with a loss! Score: 48 vs 30
+2025-02-27 06:07:55,456 - golf-ai - INFO - Episode 63 finished with a tie! Score: 30 vs 30
+2025-02-27 06:07:55,470 - golf-ai - INFO - Episode 64 finished with a loss! Score: 46 vs 26
+2025-02-27 06:07:55,542 - golf-ai - INFO - Episode 65 finished with a win! Score: 27 vs 42
+2025-02-27 06:07:55,600 - golf-ai - INFO - Episode 66 finished with a win! Score: 38 vs 42
+2025-02-27 06:07:55,627 - golf-ai - INFO - Episode 67 finished with a win! Score: 39 vs 46
+2025-02-27 06:07:55,659 - golf-ai - INFO - Episode 68 finished with a win! Score: 15 vs 37
+2025-02-27 06:07:55,687 - golf-ai - INFO - Episode 69 finished with a loss! Score: 47 vs 31
+2025-02-27 06:07:55,729 - golf-ai - INFO - Episode 70 finished with a loss! Score: 41 vs 27
+2025-02-27 06:07:55,782 - golf-ai - INFO - Episode 71 finished with a loss! Score: 45 vs 38
+2025-02-27 06:07:55,830 - golf-ai - INFO - Episode 72 finished with a win! Score: 9 vs 46
+2025-02-27 06:07:55,859 - golf-ai - INFO - Episode 73 finished with a win! Score: 14 vs 38
+2025-02-27 06:07:55,892 - golf-ai - INFO - Episode 74 finished with a win! Score: 39 vs 40
+2025-02-27 06:07:55,978 - golf-ai - WARNING - Episode 75 reached max turns limit!
+2025-02-27 06:07:55,978 - golf-ai - INFO - Episode 75 finished with a tie! Score: 0 vs 0
+2025-02-27 06:07:56,003 - golf-ai - INFO - Episode 76 finished with a win! Score: 34 vs 49
+2025-02-27 06:07:56,060 - golf-ai - INFO - Episode 77 finished with a win! Score: 19 vs 29
+2025-02-27 06:07:56,105 - golf-ai - INFO - Episode 78 finished with a win! Score: 22 vs 47
+2025-02-27 06:07:56,192 - golf-ai - WARNING - Episode 79 reached max turns limit!
+2025-02-27 06:07:56,192 - golf-ai - INFO - Episode 79 finished with a tie! Score: 0 vs 0
+2025-02-27 06:07:56,240 - golf-ai - INFO - Episode 80 finished with a win! Score: 23 vs 42
+2025-02-27 06:07:56,327 - golf-ai - WARNING - Episode 81 reached max turns limit!
+2025-02-27 06:07:56,327 - golf-ai - INFO - Episode 81 finished with a tie! Score: 0 vs 0
+2025-02-27 06:07:56,352 - golf-ai - INFO - Episode 82 finished with a loss! Score: 22 vs 7
+2025-02-27 06:07:56,437 - golf-ai - INFO - Episode 83 finished with a loss! Score: 47 vs 27
+2025-02-27 06:07:56,463 - golf-ai - INFO - Episode 84 finished with a win! Score: 47 vs 54
+2025-02-27 06:07:56,499 - golf-ai - INFO - Episode 85 finished with a win! Score: 29 vs 48
+2025-02-27 06:07:56,522 - golf-ai - INFO - Episode 86 finished with a win! Score: 31 vs 32
+2025-02-27 06:07:56,565 - golf-ai - INFO - Episode 87 finished with a win! Score: 22 vs 50
+2025-02-27 06:07:56,586 - golf-ai - INFO - Episode 88 finished with a win! Score: 35 vs 38
+2025-02-27 06:07:56,627 - golf-ai - INFO - Episode 89 finished with a win! Score: 46 vs 50
+2025-02-27 06:07:56,699 - golf-ai - INFO - Episode 90 finished with a loss! Score: 36 vs 23
+2025-02-27 06:07:56,727 - golf-ai - INFO - Episode 91 finished with a win! Score: 31 vs 46
+2025-02-27 06:07:56,763 - golf-ai - INFO - Episode 92 finished with a loss! Score: 33 vs 29
+2025-02-27 06:07:56,825 - golf-ai - INFO - Episode 93 finished with a loss! Score: 42 vs 33
+2025-02-27 06:07:56,858 - golf-ai - INFO - Episode 94 finished with a loss! Score: 47 vs 36
+2025-02-27 06:07:56,931 - golf-ai - INFO - Episode 95 finished with a loss! Score: 41 vs 33
+2025-02-27 06:07:56,947 - golf-ai - INFO - Episode 96 finished with a win! Score: 28 vs 31
+2025-02-27 06:07:56,990 - golf-ai - INFO - Episode 97 finished with a tie! Score: 31 vs 31
+2025-02-27 06:07:57,010 - golf-ai - INFO - Episode 98 finished with a win! Score: 31 vs 33
+2025-02-27 06:07:57,050 - golf-ai - INFO - Episode 99 finished with a win! Score: 36 vs 45
+2025-02-27 06:07:57,089 - golf-ai - INFO - Episode 100 finished with a win! Score: 16 vs 18
+2025-02-27 06:07:57,089 - golf-ai - INFO - Evaluation results - Win rate: 0.54, Loss rate: 0.38, Tie rate: 0.08
+2025-02-27 06:07:57,089 - golf-ai - INFO - Average Golf Scores - Agent: 32.43, Opponent: 34.20, Diff: 1.77
+2025-02-27 06:07:57,089 - golf-ai - INFO - Max turns reached in 0.05 of games
+2025-02-27 06:07:57,089 - golf-ai - INFO - Episode 2500/20000, Epsilon: 0.4776
+2025-02-27 06:08:57,333 - golf-ai - INFO - Episode 2600: Reward=26.79, Avg Loss=0.4002
+2025-02-27 06:08:57,334 - golf-ai - INFO - Epsilon=0.4638 (Current)
+2025-02-27 06:08:57,334 - golf-ai - INFO - Stats: Win Rate=0.40, Avg Steps=42.7, Max Turns Rate=0.01
+2025-02-27 06:08:57,334 - golf-ai - INFO - Stability: High Losses=0
+2025-02-27 06:09:57,317 - golf-ai - INFO - Episode 2700: Reward=-12.09, Avg Loss=0.3759
+2025-02-27 06:09:57,318 - golf-ai - INFO - Epsilon=0.4504 (Current)
+2025-02-27 06:09:57,318 - golf-ai - INFO - Stats: Win Rate=0.40, Avg Steps=42.8, Max Turns Rate=0.01
+2025-02-27 06:09:57,318 - golf-ai - INFO - Stability: High Losses=0

@@ -93,10 +93,59 @@ def main():
             if args.num_workers == 0:
                 args.num_workers = min(4, num_cpu)
                 print(f"- Setting number of worker processes to {args.num_workers}")
+                
+            # Enable mixed precision training
+            print("- Enabling mixed precision training for faster computation")
+            cmd.extend(["--mixed-precision"])
+            
+            # Optimize memory usage
+            print("- Optimizing memory usage with pinned memory")
+            cmd.extend(["--pin-memory"])
+            
+            # Use larger batch size for better GPU utilization
+            if batch_size < 512 and gpu_memory >= 8:
+                batch_size = min(512, batch_size * 2)
+                print(f"- Increased batch size to {batch_size} for better GPU utilization")
+                
+            # Reduce learning frequency
+            print("- Reducing learning frequency for better throughput")
+            cmd.extend(["--learn-every", "8"])
+            
+            # Use Huber loss for better stability
+            print("- Using Huber loss for better stability")
+            cmd.extend(["--use-huber-loss"])
     elif torch.backends.mps.is_available():
         print("Apple MPS (Metal Performance Shaders) detected")
         batch_size = 128
         print(f"Set batch size to {batch_size} for MPS")
+        
+        # Apply MPS-specific optimizations
+        if args.cuda_optimize:
+            print("Applying MPS-specific optimizations:")
+            
+            # Disable debugging features for better performance
+            print("- Disabling PyTorch debugging features")
+            torch.autograd.set_detect_anomaly(False)
+            torch.autograd.profiler.profile(enabled=False)
+            
+            # Set number of threads for CPU operations
+            import multiprocessing
+            num_cpu = multiprocessing.cpu_count()
+            torch.set_num_threads(num_cpu)
+            print(f"- Setting PyTorch to use {num_cpu} CPU threads")
+            
+            # Set worker processes if not specified
+            if args.num_workers == 0:
+                args.num_workers = min(4, num_cpu)
+                print(f"- Setting number of worker processes to {args.num_workers}")
+            
+            # Use Huber loss for better stability
+            print("- Using Huber loss for better stability")
+            cmd.extend(["--use-huber-loss"])
+            
+            # Reduce learning frequency (but less aggressively than CUDA)
+            print("- Reducing learning frequency for better throughput")
+            cmd.extend(["--learn-every", "4"])
     else:
         print("Running on CPU")
         batch_size = 64

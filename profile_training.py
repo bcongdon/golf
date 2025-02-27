@@ -264,6 +264,21 @@ def main():
     if torch.cuda.is_available():
         print("- For CUDA optimization, try using mixed precision training and reducing CPU-GPU transfers.")
         print("  Run with --profile-cuda to get detailed CUDA operation timings.")
+        print("\nAdditional CUDA Optimization Recommendations:")
+        print("1. Increase batch size to 512 or 1024 for better GPU utilization")
+        print("2. Reduce learning frequency (learn every 8-16 steps instead of every step)")
+        print("3. Use pin_memory=True for all DataLoaders and tensor transfers")
+        print("4. Enable TensorFloat-32 on Ampere GPUs with:")
+        print("   torch.backends.cuda.matmul.allow_tf32 = True")
+        print("   torch.backends.cudnn.allow_tf32 = True")
+        print("5. Use torch.compile() for the neural networks (requires PyTorch 2.0+)")
+        print("6. Consider using torch.jit.script for performance-critical functions")
+        print("7. Set environment variables for better CUDA performance:")
+        print("   CUDA_LAUNCH_BLOCKING=0")
+        print("   PYTORCH_CUDA_ALLOC_CONF=max_split_size_mb:128")
+        print("8. Use channels_last memory format for convolutional networks")
+        print("9. Implement asynchronous data loading with multiple workers")
+        print("10. Use Huber loss instead of MSE for better stability and performance")
 
 if __name__ == "__main__":
     main() 

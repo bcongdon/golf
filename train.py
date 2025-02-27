@@ -8,6 +8,7 @@ import logging
 from golf_game import GolfGame
 from agent import DQNAgent
 import random
+from collections import deque
 
 # Setup logging
 def setup_logging(log_level):
@@ -59,6 +60,21 @@ def parse_args():
                         help='Logging level')
     parser.add_argument('--num-workers', type=int, default=0, 
                         help='Number of worker processes for environment (0=auto)')
+    
+    # New optimization arguments
+    parser.add_argument('--mixed-precision', action='store_true', 
+                        help='Enable mixed precision training for faster computation')
+    parser.add_argument('--pin-memory', action='store_true', 
+                        help='Use pinned memory for faster CPU-GPU transfers')
+    parser.add_argument('--learn-every', type=int, default=4, 
+                        help='Learn every N steps to reduce overhead')
+    parser.add_argument('--use-huber-loss', action='store_true', 
+                        help='Use Huber loss instead of MSE for better stability')
+    parser.add_argument('--segment-tree', action='store_true', 
+                        help='Use segment tree for more efficient sampling in replay buffer')
+    parser.add_argument('--optimize-memory', action='store_true', 
+                        help='Optimize memory usage with float16 for states')
+    
     return parser.parse_args()
 
 def evaluate_agent(agent, num_episodes=100, logger=None):
@@ -209,6 +225,12 @@ def train(args, logger, logs_dir):
         per_beta_increment=0.0001  # Beta increment per learning step
     )
     
+    # Apply optimization settings
+    if args.mixed_precision and agent.device.type == 'cuda':
+        agent.use_amp = True
+        agent.scaler = torch.cuda.amp.GradScaler()
+        logger.info("Enabled mixed precision training for faster computation")
+    
     # Log device information
     device_info = f"Using device: {agent.device}"
     if agent.device.type == 'cuda':
@@ -220,7 +242,14 @@ def train(args, logger, logs_dir):
         # Set PyTorch to use TensorFloat-32 (TF32) on Ampere GPUs
         if torch.cuda.get_device_capability()[0] >= 8:  # Ampere or newer
             torch.set_float32_matmul_precision('high')
+            torch.backends.cuda.matmul.allow_tf32 = True
+            torch.backends.cudnn.allow_tf32 = True
             logger.info("Ampere GPU detected - Using TensorFloat-32 for faster training")
+            
+        # Use pinned memory for faster CPU-GPU transfers
+        if args.pin_memory:
+            logger.info("Using pinned memory for faster CPU-GPU transfers")
+            # This is handled in the agent's learn method
     logger.info(device_info)
     
     logger.info("Using Prioritized Experience Replay with win episode marking")
@@ -239,32 +268,32 @@ def train(args, logger, logs_dir):
     random_opponent_prob = 0.7  # Start with high probability of random opponent
     random_opponent_decay = 0.9999  # Decay factor
     
-    logger.info(f"Initialized opponent pool with size {opponent_pool_size} and update frequency {opponent_update_frequency}")
-    
-    # Training loop
+    # Metrics tracking
     rewards = []
     losses = []
-    
-    # Evaluation metrics
+    episode_steps = []
     eval_rewards = []
-    eval_win_rates = [] 
+    eval_win_rates = []
     eval_loss_rates = []
     eval_max_turns_rates = []
     eval_avg_scores = []
     eval_score_diffs = []
-    best_eval_reward = float('-inf')  # Best score difference (renamed for backward compatibility)
     
-    # Additional metrics for PER
-    win_count = 0
-    episode_steps = []
-    max_turns_reached_count = 0
+    # Learning rate history
+    lr_history = []
+    lr_history_episodes = []
     
-    # Metrics for learning stability
+    # Stability tracking
     high_loss_count = 0
     consecutive_high_losses = 0
     learning_rate_adjustments = 0
-    lr_history = [args.lr]  # Start with initial learning rate
-    lr_history_episodes = [0]  # Episodes where LR changed
+    
+    # Best model tracking
+    best_eval_reward = float('-inf')
+    
+    # Win count tracking
+    win_count = 0
+    max_turns_reached_count = 0
     
     # Function to save charts
     def save_charts(episode):
@@ -427,19 +456,21 @@ def train(args, logger, logs_dir):
             _ = agent.target_network(dummy_state)
         logger.info("Neural networks pre-compiled")
     
-    # Batch size for environment steps (to reduce Python overhead)
-    env_batch_size = 4 if use_multiprocessing else 1
-    
     # Adjust learning frequency based on device
     if agent.device.type == 'cuda':
         # On GPU, we can afford to learn less frequently but with larger batches
-        learn_every = 8  # Learn every 8 steps to reduce overhead
+        learn_every = args.learn_every  # Use command line argument
         # Increase effective batch size for better GPU utilization
         effective_batch_size = args.batch_size * 2
         logger.info(f"GPU detected: Learning every {learn_every} steps with effective batch size {effective_batch_size}")
+    elif agent.device.type == 'mps':
+        # On MPS, use a moderate learning frequency
+        learn_every = args.learn_every
+        effective_batch_size = args.batch_size
+        logger.info(f"MPS detected: Learning every {learn_every} steps with batch size {effective_batch_size}")
     else:
         # On CPU, learn more frequently with smaller batches
-        learn_every = 4
+        learn_every = args.learn_every
         effective_batch_size = args.batch_size
         logger.info(f"CPU mode: Learning every {learn_every} steps with batch size {effective_batch_size}")
     

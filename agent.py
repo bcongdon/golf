@@ -109,18 +109,89 @@ class PrioritizedReplayBuffer:
         self._initialized = False
         
         # Use a more efficient data structure for sampling
-        self._segment_tree_sum = None
-        self._segment_tree_min = None
+        self._segment_tree_initialized = False
+        self._sum_tree = None
+        self._min_tree = None
+        
+        # Cache for faster sampling
+        self._cached_indices = None
+        self._cached_weights = None
+        self._last_beta = None
     
     def _initialize_arrays(self, state_shape):
         """Initialize arrays based on first experience."""
         if not self._initialized:
-            self._states = np.zeros((self.capacity,) + state_shape, dtype=np.float32)
-            self._next_states = np.zeros((self.capacity,) + state_shape, dtype=np.float32)
-            self._actions = np.zeros(self.capacity, dtype=np.int64)
+            # Use float16 for states to reduce memory usage (if using CUDA)
+            if torch.cuda.is_available():
+                self._states = np.zeros((self.capacity,) + state_shape, dtype=np.float16)
+                self._next_states = np.zeros((self.capacity,) + state_shape, dtype=np.float16)
+            else:
+                # For CPU or MPS, use float32
+                self._states = np.zeros((self.capacity,) + state_shape, dtype=np.float32)
+                self._next_states = np.zeros((self.capacity,) + state_shape, dtype=np.float32)
+                
+            self._actions = np.zeros(self.capacity, dtype=np.int32)  # int32 is enough for actions
             self._rewards = np.zeros(self.capacity, dtype=np.float32)
             self._dones = np.zeros(self.capacity, dtype=np.bool_)
             self._initialized = True
+            
+            # Initialize segment trees for efficient sampling
+            self._initialize_segment_trees()
+    
+    def _initialize_segment_trees(self):
+        """Initialize segment trees for efficient sampling."""
+        if not self._segment_tree_initialized:
+            # Create sum and min trees for efficient sampling
+            self._sum_tree = np.zeros(2 * self.capacity - 1, dtype=np.float32)
+            self._min_tree = np.zeros(2 * self.capacity - 1, dtype=np.float32)
+            self._segment_tree_initialized = True
+    
+    def _update_segment_trees(self, idx, priority):
+        """Update segment trees with new priority."""
+        if not self._segment_tree_initialized:
+            return
+            
+        # Convert to tree index
+        tree_idx = idx + self.capacity - 1
+        
+        # Update sum tree
+        change = priority - self._sum_tree[tree_idx]
+        self._sum_tree[tree_idx] = priority
+        
+        # Propagate changes up the tree
+        while tree_idx > 0:
+            tree_idx = (tree_idx - 1) // 2
+            self._sum_tree[tree_idx] = self._sum_tree[2 * tree_idx + 1] + self._sum_tree[2 * tree_idx + 2]
+        
+        # Update min tree
+        tree_idx = idx + self.capacity - 1
+        self._min_tree[tree_idx] = priority
+        
+        # Propagate changes up the tree
+        while tree_idx > 0:
+            tree_idx = (tree_idx - 1) // 2
+            self._min_tree[tree_idx] = min(self._min_tree[2 * tree_idx + 1], self._min_tree[2 * tree_idx + 2])
+    
+    def _get_priority(self, idx):
+        """Get priority from segment tree."""
+        if not self._segment_tree_initialized:
+            return self.priorities[idx]
+            
+        return self._sum_tree[idx + self.capacity - 1]
+    
+    def _sum(self):
+        """Get sum of all priorities."""
+        if not self._segment_tree_initialized:
+            return np.sum(self.priorities[:self.size])
+            
+        return self._sum_tree[0]
+    
+    def _min(self):
+        """Get minimum priority."""
+        if not self._segment_tree_initialized:
+            return np.min(self.priorities[:self.size]) if self.size > 0 else 1.0
+            
+        return self._min_tree[0]
     
     def add(self, state, action, reward, next_state, done, win=False):
         """Add a new experience to the buffer."""
@@ -146,29 +217,83 @@ class PrioritizedReplayBuffer:
                 # Add to buffer
                 if self.size < self.capacity:
                     if self._initialized:
-                        self._states[self.size] = state
+                        # Convert to float16 if using CUDA to save memory
+                        if torch.cuda.is_available():
+                            self._states[self.size] = state.astype(np.float16)
+                            self._next_states[self.size] = next_state.astype(np.float16)
+                        else:
+                            # For CPU or MPS, use float32
+                            self._states[self.size] = state
+                            self._next_states[self.size] = next_state
+                            
                         self._actions[self.size] = action
                         self._rewards[self.size] = reward
-                        self._next_states[self.size] = next_state
                         self._dones[self.size] = done
                     else:
                         self.buffer.append(exp)
+                        
                     self.priorities[self.size] = priority
+                    self._update_segment_trees(self.size, priority ** self.alpha)
                     self.size += 1
                 else:
                     if self._initialized:
-                        self._states[self.position] = state
+                        # Convert to float16 if using CUDA to save memory
+                        if torch.cuda.is_available():
+                            self._states[self.position] = state.astype(np.float16)
+                            self._next_states[self.position] = next_state.astype(np.float16)
+                        else:
+                            # For CPU or MPS, use float32
+                            self._states[self.position] = state
+                            self._next_states[self.position] = next_state
+                            
                         self._actions[self.position] = action
                         self._rewards[self.position] = reward
-                        self._next_states[self.position] = next_state
                         self._dones[self.position] = done
                     else:
                         self.buffer[self.position] = exp
+                        
                     self.priorities[self.position] = priority
+                    self._update_segment_trees(self.position, priority ** self.alpha)
                     self.position = (self.position + 1) % self.capacity
             
             # Clear the current episode
             self.current_episode = []
+    
+    def _sample_proportional(self, batch_size):
+        """Sample indices based on proportional prioritization."""
+        if not self._segment_tree_initialized:
+            # Fallback to numpy sampling
+            priorities = self.priorities[:self.size]
+            probs = priorities ** self.alpha
+            probs /= np.sum(probs)
+            return np.random.choice(self.size, batch_size, p=probs, replace=False)
+        
+        indices = np.zeros(batch_size, dtype=np.int32)
+        
+        # Get sum of priorities
+        total_priority = self._sum()
+        
+        # Divide range into batch_size segments
+        segment_size = total_priority / batch_size
+        
+        for i in range(batch_size):
+            # Sample uniformly from segment
+            mass = np.random.uniform(segment_size * i, segment_size * (i + 1))
+            
+            # Search for index in sum tree
+            idx = 0
+            while idx < self.capacity - 1:
+                left = 2 * idx + 1
+                if mass <= self._sum_tree[left]:
+                    idx = left
+                else:
+                    mass -= self._sum_tree[left]
+                    idx = 2 * idx + 2
+            
+            # Convert tree index to buffer index
+            indices[i] = idx - (self.capacity - 1)
+        
+        return indices
     
     def sample(self, batch_size: int) -> Tuple[List, List[int], np.ndarray]:
         """Sample a batch of experiences based on priorities using vectorized operations."""
@@ -178,17 +303,21 @@ class PrioritizedReplayBuffer:
         # Update beta for importance sampling
         self.beta = min(1.0, self.beta + self.beta_increment)
         
-        # Calculate sampling probabilities (vectorized)
-        priorities = self.priorities[:self.size]
-        probabilities = priorities ** self.alpha
-        probabilities /= probabilities.sum()
-        
-        # Sample indices based on probabilities
-        indices = np.random.choice(self.size, min(batch_size, self.size), p=probabilities, replace=False)
-        
-        # Calculate importance sampling weights (vectorized)
-        weights = (self.size * probabilities[indices]) ** (-self.beta)
-        weights /= weights.max()  # Normalize weights
+        # Check if we can reuse cached indices and weights
+        if self._cached_indices is not None and len(self._cached_indices) == batch_size and self._last_beta == self.beta:
+            indices = self._cached_indices
+            weights = self._cached_weights
+        else:
+            # Sample indices based on priorities
+            indices = self._sample_proportional(min(batch_size, self.size))
+            
+            # Calculate importance sampling weights
+            weights = self._calculate_weights(indices)
+            
+            # Cache for next time
+            self._cached_indices = indices
+            self._cached_weights = weights
+            self._last_beta = self.beta
         
         # Get sampled experiences
         if self._initialized:
@@ -198,22 +327,53 @@ class PrioritizedReplayBuffer:
             rewards = self._rewards[indices]
             next_states = self._next_states[indices]
             dones = self._dones[indices]
+            
+            # Convert float16 back to float32 if needed
+            if torch.cuda.is_available() and states.dtype == np.float16:
+                states = states.astype(np.float32)
+                next_states = next_states.astype(np.float32)
+                
             experiences = list(zip(states, actions, rewards, next_states, dones))
         else:
             experiences = [self.buffer[idx] for idx in indices]
         
         return experiences, indices, weights
     
+    def _calculate_weights(self, indices):
+        """Calculate importance sampling weights."""
+        # Get priorities for the sampled indices
+        if self._segment_tree_initialized:
+            priorities = np.array([self._get_priority(idx) for idx in indices])
+        else:
+            priorities = self.priorities[indices]
+        
+        # Convert priorities to probabilities
+        probs = priorities / self._sum()
+        
+        # Calculate importance sampling weights
+        weights = (self.size * probs) ** (-self.beta)
+        
+        # Normalize weights
+        weights /= weights.max()
+        
+        return weights
+    
     def update_priorities(self, indices: List[int], td_errors: np.ndarray):
         """Update priorities based on TD errors using vectorized operations."""
         # Add small epsilon to ensure non-zero priority (vectorized)
         new_priorities = np.abs(td_errors) + 1e-5
         
-        # Update priorities
-        self.priorities[indices] = new_priorities
+        # Update priorities and segment trees
+        for idx, priority in zip(indices, new_priorities):
+            self.priorities[idx] = priority
+            self._update_segment_trees(idx, priority ** self.alpha)
         
         # Update max priority
         self.max_priority = max(self.max_priority, new_priorities.max())
+        
+        # Invalidate cache
+        self._cached_indices = None
+        self._cached_weights = None
     
     def __len__(self) -> int:
         return self.size
@@ -400,9 +560,15 @@ class DQNAgent:
             # Data is already in numpy arrays, just convert to tensors
             states, actions, rewards, next_states, dones = zip(*batch)
             
-            # Pin memory for faster CPU->GPU transfer
-            states_tensor = torch.from_numpy(np.array(states, dtype=np.float32)).pin_memory().to(self.device, non_blocking=True)
-            next_states_tensor = torch.from_numpy(np.array(next_states, dtype=np.float32)).pin_memory().to(self.device, non_blocking=True)
+            # Handle device-specific memory optimizations
+            if self.device.type == 'cuda':
+                # Pin memory for faster CPU->GPU transfer (CUDA only)
+                states_tensor = torch.from_numpy(np.array(states, dtype=np.float32)).pin_memory().to(self.device, non_blocking=True)
+                next_states_tensor = torch.from_numpy(np.array(next_states, dtype=np.float32)).pin_memory().to(self.device, non_blocking=True)
+            else:
+                # For CPU or MPS, don't use pin_memory
+                states_tensor = torch.from_numpy(np.array(states, dtype=np.float32)).to(self.device)
+                next_states_tensor = torch.from_numpy(np.array(next_states, dtype=np.float32)).to(self.device)
             
             # Smaller tensors can be transferred directly
             actions_tensor = torch.tensor(actions, dtype=torch.long, device=self.device)
@@ -416,9 +582,15 @@ class DQNAgent:
             states_np = np.array(states, dtype=np.float32)
             next_states_np = np.array(next_states, dtype=np.float32)
             
-            # Pin memory for faster CPU->GPU transfer
-            states_tensor = torch.from_numpy(states_np).pin_memory().to(self.device, non_blocking=True)
-            next_states_tensor = torch.from_numpy(next_states_np).pin_memory().to(self.device, non_blocking=True)
+            # Handle device-specific memory optimizations
+            if self.device.type == 'cuda':
+                # Pin memory for faster CPU->GPU transfer (CUDA only)
+                states_tensor = torch.from_numpy(states_np).pin_memory().to(self.device, non_blocking=True)
+                next_states_tensor = torch.from_numpy(next_states_np).pin_memory().to(self.device, non_blocking=True)
+            else:
+                # For CPU or MPS, don't use pin_memory
+                states_tensor = torch.from_numpy(states_np).to(self.device)
+                next_states_tensor = torch.from_numpy(next_states_np).to(self.device)
             
             # Smaller tensors can be transferred directly
             actions_tensor = torch.tensor(actions, dtype=torch.long, device=self.device)

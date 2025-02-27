@@ -32,10 +32,12 @@ def parse_args():
 def get_default_sweep_config():
     """Default hyperparameter configurations to sweep."""
     return {
-        "learning_rate": [0.0001, 0.0005, 0.001],
+        "lr": [0.0001, 0.0005, 0.001],
         "batch_size": [128, 256, 512],
         "hidden_size": [256, 512],
         "gamma": [0.95, 0.99],
+        "epsilon_start": [1.0],
+        "epsilon_end": [0.01, 0.05],
         "epsilon_decay": [0.9995, 0.9998],
         "learn_every": [1, 4, 8],
         "target_update": [500, 1000, 2000]
@@ -146,6 +148,10 @@ def run_training(config, output_dir, run_id):
     print(f"Starting run {run_id} with config: {config}")
     print(f"Command: {' '.join(cmd)}")
     
+    # Save the command to a file for reference
+    with open(os.path.join(run_dir, "command.txt"), 'w') as f:
+        f.write(' '.join(cmd))
+    
     start_time = time.time()
     
     try:
@@ -154,31 +160,57 @@ def run_training(config, output_dir, run_id):
             cmd, 
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
-            universal_newlines=True
+            universal_newlines=True,
+            bufsize=1  # Line buffered
         )
         
-        # Stream output to a log file
-        with open(os.path.join(run_dir, "output.log"), 'w') as log_file:
-            for line in process.stdout:
-                log_file.write(line)
-                log_file.flush()
-        
-        # Wait for process to complete
-        process.wait()
+        # Open log files
+        with open(os.path.join(run_dir, "output.log"), 'w') as stdout_log, \
+             open(os.path.join(run_dir, "error.log"), 'w') as stderr_log:
+            
+            # Function to handle output streams
+            def log_stream(stream, log_file, prefix=""):
+                for line in stream:
+                    log_file.write(f"{prefix}{line}")
+                    log_file.flush()
+                    # Also print to console for visibility
+                    print(f"Run {run_id} {prefix}{line.rstrip()}")
+            
+            # Create threads to handle stdout and stderr
+            import threading
+            stdout_thread = threading.Thread(
+                target=log_stream, 
+                args=(process.stdout, stdout_log)
+            )
+            stderr_thread = threading.Thread(
+                target=log_stream, 
+                args=(process.stderr, stderr_log, "ERROR: ")
+            )
+            
+            # Start threads
+            stdout_thread.start()
+            stderr_thread.start()
+            
+            # Wait for process to complete
+            return_code = process.wait()
+            
+            # Wait for logging to complete
+            stdout_thread.join()
+            stderr_thread.join()
         
         end_time = time.time()
         duration = end_time - start_time
         
         # Check if process completed successfully
-        if process.returncode == 0:
+        if return_code == 0:
             print(f"Run {run_id} completed successfully in {duration:.2f} seconds")
             return True, run_id, duration
         else:
-            print(f"Run {run_id} failed with return code {process.returncode}")
-            # Capture error output
-            error_output = process.stderr.read()
-            with open(os.path.join(run_dir, "error.log"), 'w') as error_file:
-                error_file.write(error_output)
+            print(f"Run {run_id} failed with return code {return_code}")
+            
+            # Add a summary to the error log
+            with open(os.path.join(run_dir, "error.log"), 'a') as f:
+                f.write(f"\n\nProcess exited with code {return_code}\n")
             
             return False, run_id, duration
             
@@ -186,6 +218,13 @@ def run_training(config, output_dir, run_id):
         end_time = time.time()
         duration = end_time - start_time
         print(f"Run {run_id} failed with exception: {str(e)}")
+        
+        # Log the exception
+        with open(os.path.join(run_dir, "error.log"), 'w') as error_file:
+            error_file.write(f"Exception: {str(e)}\n")
+            import traceback
+            error_file.write(traceback.format_exc())
+            
         return False, run_id, duration
 
 def run_batch(batch, output_dir, start_id):
@@ -306,7 +345,7 @@ def analyze_results(output_dir):
         print(f"  Final Win Rate: {row['final_win_rate']:.4f}")
         print(f"  Final Score Diff: {row['final_score_diff']:.4f}")
         print("  Configuration:")
-        for key in ['learning_rate', 'batch_size', 'hidden_size', 'gamma', 
+        for key in ['lr', 'batch_size', 'hidden_size', 'gamma', 
                     'epsilon_decay', 'learn_every', 'target_update']:
             if key in row:
                 print(f"    {key}: {row[key]}")
@@ -321,7 +360,7 @@ def create_parameter_importance_plots(results_df, output_dir):
     print("\nCreating parameter importance plots...")
     
     # Parameters to analyze
-    params = ['learning_rate', 'batch_size', 'hidden_size', 'gamma', 
+    params = ['lr', 'batch_size', 'hidden_size', 'gamma', 
               'epsilon_decay', 'learn_every', 'target_update']
     
     # Metrics to analyze

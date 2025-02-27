@@ -4,6 +4,7 @@ import sys
 import argparse
 import itertools
 import multiprocessing
+from concurrent.futures import ProcessPoolExecutor
 import subprocess
 import time
 import json
@@ -12,6 +13,8 @@ import pandas as pd
 from datetime import datetime
 import matplotlib.pyplot as plt
 from pathlib import Path
+import threading
+import random
 
 def parse_args():
     parser = argparse.ArgumentParser(description='Run hyperparameter sweep for Golf Card Game AI')
@@ -31,6 +34,8 @@ def parse_args():
                         help='Interval (in minutes) to write progress reports')
     parser.add_argument('--html-report', action='store_true',
                         help='Generate HTML report with interactive visualizations')
+    parser.add_argument('--random-seed', type=int, default=None,
+                        help='Random seed for reproducibility of configuration order')
     return parser.parse_args()
 
 def get_default_sweep_config():
@@ -63,7 +68,7 @@ def estimate_memory_usage(batch_size, hidden_size):
     
     return int(base_memory * batch_factor * hidden_factor)
 
-def generate_run_configs(sweep_config, max_parallel, gpu_memory, episodes, eval_interval):
+def generate_run_configs(sweep_config, gpu_memory, episodes, eval_interval):
     """Generate all possible hyperparameter configurations."""
     # Get all possible combinations of hyperparameters
     keys = sweep_config.keys()
@@ -85,33 +90,19 @@ def generate_run_configs(sweep_config, max_parallel, gpu_memory, episodes, eval_
             config.get('hidden_size', 512)
         )
         
+        # Skip configurations that would exceed GPU memory
+        if config['memory_estimate'] > gpu_memory:
+            print(f"Skipping configuration that exceeds GPU memory: {config}")
+            continue
+            
         configs.append(config)
     
-    # Sort configurations by estimated memory usage (descending)
-    # This helps pack configurations efficiently
-    configs.sort(key=lambda x: x['memory_estimate'], reverse=True)
+    # Randomize the order of configurations to get diverse signal early
+    random.shuffle(configs)
     
-    # Group configurations into batches that can run in parallel
-    batches = []
-    current_batch = []
-    current_memory = 0
+    print(f"Generated {len(configs)} valid configurations after filtering for GPU memory constraints")
     
-    for config in configs:
-        # If adding this config exceeds memory or max parallel limit, start a new batch
-        if (current_memory + config['memory_estimate'] > gpu_memory or 
-            len(current_batch) >= max_parallel):
-            batches.append(current_batch)
-            current_batch = []
-            current_memory = 0
-        
-        current_batch.append(config)
-        current_memory += config['memory_estimate']
-    
-    # Add the last batch if not empty
-    if current_batch:
-        batches.append(current_batch)
-    
-    return batches
+    return configs
 
 def run_training(config, output_dir, run_id):
     """Run a single training configuration."""
@@ -181,7 +172,6 @@ def run_training(config, output_dir, run_id):
                     print(f"Run {run_id} {prefix}{line.rstrip()}")
             
             # Create threads to handle stdout and stderr
-            import threading
             stdout_thread = threading.Thread(
                 target=log_stream, 
                 args=(process.stdout, stdout_log)
@@ -231,22 +221,30 @@ def run_training(config, output_dir, run_id):
             
         return False, run_id, duration
 
-def run_batch(batch, output_dir, start_id):
-    """Run a batch of configurations in parallel."""
-    processes = []
-    
-    for i, config in enumerate(batch):
-        run_id = start_id + i
-        p = multiprocessing.Process(
-            target=run_training,
-            args=(config, output_dir, run_id)
-        )
-        processes.append(p)
-        p.start()
-    
-    # Wait for all processes to complete
-    for p in processes:
-        p.join()
+# New function to handle training completion
+def training_complete_callback(future, run_id, completed_runs, total_runs, output_dir, start_time, last_report_time, report_interval):
+    """Callback function when a training run completes."""
+    try:
+        result = future.result()
+        success, run_id, duration = result
+        
+        # Increment completed runs counter
+        with completed_runs.get_lock():
+            completed_runs.value += 1
+            current_completed = completed_runs.value
+        
+        # Log completion
+        status = "successfully" if success else "with errors"
+        print(f"Run {run_id} completed {status} in {duration:.2f} seconds. Progress: {current_completed}/{total_runs}")
+        
+        # Check if it's time to write a progress report
+        current_time = time.time()
+        with last_report_time.get_lock():
+            if (current_time - last_report_time.value) >= (report_interval * 60):
+                write_progress_report(output_dir, current_completed, total_runs, start_time)
+                last_report_time.value = current_time
+    except Exception as e:
+        print(f"Error in callback for run {run_id}: {str(e)}")
 
 def analyze_results(output_dir):
     """Analyze and compare results from all runs."""
@@ -949,6 +947,18 @@ def main():
     
     print(f"Hyperparameter sweep results will be saved to {output_dir}")
     
+    # Set random seed if provided
+    if args.random_seed is not None:
+        random.seed(args.random_seed)
+        np.random.seed(args.random_seed)
+        print(f"Using random seed: {args.random_seed}")
+    else:
+        # Use current time as seed for true randomness
+        seed = int(time.time())
+        random.seed(seed)
+        np.random.seed(seed)
+        print(f"Using time-based random seed: {seed}")
+    
     # Load sweep configuration
     sweep_config = load_sweep_config(args.sweep_config)
     
@@ -957,40 +967,59 @@ def main():
         json.dump(sweep_config, f, indent=2)
     
     # Generate run configurations
-    batches = generate_run_configs(
+    configs = generate_run_configs(
         sweep_config, 
-        args.max_parallel, 
         args.gpu_memory, 
         args.episodes, 
         args.eval_interval
     )
     
-    total_runs = sum(len(batch) for batch in batches)
-    print(f"Generated {total_runs} configurations in {len(batches)} batches")
+    total_runs = len(configs)
+    print(f"Running {total_runs} configurations in randomized order")
     
-    # Track start time and completed runs
+    # Save the randomized configuration order for reference
+    with open(os.path.join(output_dir, "run_order.json"), 'w') as f:
+        run_order = [{"run_id": i, "config": config} for i, config in enumerate(configs)]
+        json.dump(run_order, f, indent=2)
+    
+    # Track start time and completed runs using shared variables
     start_time = time.time()
-    completed_runs = 0
-    last_report_time = start_time
+    completed_runs = multiprocessing.Value('i', 0)
+    last_report_time = multiprocessing.Value('d', start_time)
     
-    # Run all batches
-    start_id = 0
-    for i, batch in enumerate(batches):
-        print(f"\nRunning batch {i+1}/{len(batches)} with {len(batch)} configurations")
-        run_batch(batch, output_dir, start_id)
+    # Create a process pool with max_parallel workers
+    with ProcessPoolExecutor(max_workers=args.max_parallel) as executor:
+        # Submit all configurations to the pool
+        futures = []
+        for run_id, config in enumerate(configs):
+            future = executor.submit(run_training, config, output_dir, run_id)
+            # Add callback to handle completion
+            future.add_done_callback(
+                lambda f, run_id=run_id: training_complete_callback(
+                    f, 
+                    run_id,
+                    completed_runs, 
+                    total_runs, 
+                    output_dir, 
+                    start_time, 
+                    last_report_time, 
+                    args.report_interval
+                )
+            )
+            futures.append(future)
         
-        # Update completed runs count
-        completed_runs += len(batch)
-        start_id += len(batch)
-        
-        # Check if it's time to write a progress report
-        current_time = time.time()
-        if (current_time - last_report_time) >= (args.report_interval * 60):
-            write_progress_report(output_dir, completed_runs, total_runs, start_time)
-            last_report_time = current_time
+        # Wait for all futures to complete
+        for future in futures:
+            try:
+                # This will re-raise any exceptions from the worker processes
+                # but we don't need the result here as it's handled in the callback
+                future.exception()
+            except Exception:
+                # Exceptions are already logged in the callback
+                pass
     
     # Write final progress report
-    write_progress_report(output_dir, completed_runs, total_runs, start_time)
+    write_progress_report(output_dir, completed_runs.value, total_runs, start_time)
     
     # Analyze results
     results_df = analyze_results(output_dir)

@@ -6124,3 +6124,11 @@ ValueError: Expected more than 1 value per channel when training, got input size
 2025-02-27 06:09:57,318 - golf-ai - INFO - Epsilon=0.4504 (Current)
 2025-02-27 06:09:57,318 - golf-ai - INFO - Stats: Win Rate=0.40, Avg Steps=42.8, Max Turns Rate=0.01
 2025-02-27 06:09:57,318 - golf-ai - INFO - Stability: High Losses=0
+2025-02-27 06:10:55,104 - golf-ai - INFO - Episode 2800: Reward=-5.40, Avg Loss=0.4561
+2025-02-27 06:10:55,105 - golf-ai - INFO - Epsilon=0.4374 (Current)
+2025-02-27 06:10:55,105 - golf-ai - INFO - Stats: Win Rate=0.40, Avg Steps=43.0, Max Turns Rate=0.01
+2025-02-27 06:10:55,105 - golf-ai - INFO - Stability: High Losses=0
+2025-02-27 06:11:51,505 - golf-ai - INFO - Episode 2900: Reward=0.34, Avg Loss=0.4389
+2025-02-27 06:11:51,506 - golf-ai - INFO - Epsilon=0.4248 (Current)
+2025-02-27 06:11:51,506 - golf-ai - INFO - Stats: Win Rate=0.40, Avg Steps=43.2, Max Turns Rate=0.02
+2025-02-27 06:11:51,506 - golf-ai - INFO - Stability: High Losses=0

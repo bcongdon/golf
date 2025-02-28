@@ -203,7 +203,7 @@ def train(args, logger, logs_dir):
     
     # Initialize environment and agent
     env = GolfGame(num_players=2)  # Two players for self-play: agent and opponent
-    state_size = 60  # Size of the observation space (simplified - removed suits)
+    state_size = 56  # Size of the observation space (updated for new 3-element card representation)
     action_size = 9   # Number of possible actions (removed 'knock' action)
     logger.info(f"Environment initialized with state_size={state_size}, action_size={action_size}")
     

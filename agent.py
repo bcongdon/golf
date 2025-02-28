@@ -14,7 +14,7 @@ class GolfMLP(nn.Module):
     Output: Q-values for each possible action
     """
     
-    def __init__(self, input_size: int = 60, hidden_size: int = 512, output_size: int = 9):
+    def __init__(self, input_size: int = 56, hidden_size: int = 512, output_size: int = 9):
         super(GolfMLP, self).__init__()
         
         # Determine if CUDA is available for optimizations
@@ -386,7 +386,7 @@ class DQNAgent:
     
     def __init__(
         self,
-        state_size: int = 60,  # Simplified state space (removed suits)
+        state_size: int = 56,  # Updated for 3-element card representation
         action_size: int = 9,
         hidden_size: int = 512,  # Increased from 256 to 512
         learning_rate: float = 0.0001,  # Reduced from 0.0005 to 0.0001 for more stable learning
@@ -497,16 +497,6 @@ class DQNAgent:
                         return 1  # Take from discard pile
                     else:
                         return 0  # Draw from deck
-                elif 2 <= max(valid_actions) <= 7:  # Card replacement phase
-                    # Encourage revealing unknown cards
-                    # Extract the current player's revealed cards from the state
-                    # This is a simplified approach - in practice, you'd need to extract this info from the state
-                    # For now, we'll just use a random approach that favors actions 2-7 (replacing cards)
-                    replace_actions = [a for a in valid_actions if 2 <= a <= 7]
-                    if replace_actions:
-                        return random.choice(replace_actions)
-                    else:
-                        return random.choice(valid_actions)
                 else:
                     return random.choice(valid_actions)
             else:

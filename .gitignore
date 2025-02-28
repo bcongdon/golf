@@ -14,4 +14,4 @@ wheels/
 
 training.log
 models
-
+logs/

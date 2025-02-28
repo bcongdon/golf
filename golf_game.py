@@ -96,60 +96,88 @@ class GolfGame:
         """
         Convert the game state to a neural network input representation.
         
+        Each card is represented as a 3-element vector:
+        - Rank (1-13): Ace=1, 2=2, ..., King=13 (normalized to [0,1])
+        - Wild Flag (0 or 1): 1 if the card is a 2 (wild), otherwise 0
+        - Point Value (-2 to 10): The actual score value of the card in the game (normalized to [0,1])
+        
         The observation includes:
-        - Current player's hand (with hidden cards masked - only shows revealed cards)
-        - Opponent's visible cards
-        - Top card of the discard pile
-        - Card positions and revealed flags
-        - Whether the game is in final round
+        - Current player's hand (6 cards * 3 values = 18 elements)
+        - Opponent's visible cards (6 cards * 3 values = 18 elements)
+        - Discard pile top card (3 elements)
+        - Drawn card (3 elements)
+        - Revealed flags for player (6 elements)
+        - Revealed flags for opponent (6 elements)
+        - Game state flags (2 elements: drawn_from_discard, final_round)
         
-        Simplified to only include rank information (not suits) since suits don't matter for scoring.
+        Total: 56 dimensions
         """
-        # New observation space:
-        # 13 ranks for player's cards + 13 ranks for opponent's cards + 
-        # 6 positions + 6 revealed flags + 6 opponent revealed flags + 
-        # 13 ranks for discard pile + 1 discard indicator + 1 drawn card indicator + 
-        # 13 ranks for drawn card + 1 final round indicator
-        # Total: 60 dimensions (reduced from 119)
-        obs = np.zeros((60,), dtype=np.float32)
+        # Initialize observation array
+        obs = np.zeros((56,), dtype=np.float32)
         
-        # Encode current player's hand (only revealed cards)
-        for i, card in enumerate(self.player_hands[self.current_player]):
-            # Mark position
-            obs[26 + i] = 1.0
+        # Helper function to encode a single card with normalization
+        def encode_card(card, start_idx):
+            suit, rank = card
+            # Convert from 0-indexed to 1-indexed rank and normalize to [0,1]
+            # Rank range: 1-13 -> normalized to [0,1]
+            rank_value = (rank + 1) / 13.0
             
-            # Only include card value if it's revealed
+            # Set wild flag (1 if it's a 2, which is rank 1 in 0-indexed)
+            wild_flag = 1.0 if rank == 1 else 0.0
+            
+            # Calculate point value
+            if rank == 0:  # Ace
+                point_value = 1.0
+            elif rank == 1:  # 2 (wild)
+                point_value = -2.0
+            elif rank < 10:  # 3-10
+                point_value = float(rank + 1)
+            else:  # Face cards (J, Q, K)
+                point_value = 10.0
+                
+            # Normalize point value from [-2,10] to [0,1]
+            normalized_point_value = (point_value + 2) / 12.0
+                
+            # Set the values in the observation array
+            obs[start_idx] = rank_value
+            obs[start_idx + 1] = wild_flag
+            obs[start_idx + 2] = normalized_point_value
+        
+        # Encode current player's hand
+        for i, card in enumerate(self.player_hands[self.current_player]):
+            start_idx = i * 3
+            # For revealed cards, encode the actual card
             if i in self.revealed_cards[self.current_player]:
-                _, rank = card  # Ignore suit, only use rank
-                obs[rank] = 1.0  # Set card in the first 13 positions
-                obs[32 + i] = 1.0  # Mark as revealed
+                encode_card(card, start_idx)
+                # Set revealed flag
+                obs[36 + i] = 1.0
+            # For hidden cards, leave as zeros (unknown)
         
         # Encode opponent's visible cards
         opponent = (self.current_player + 1) % self.num_players
         for i, card in enumerate(self.player_hands[opponent]):
-            # Only include opponent's revealed cards
+            # Only encode revealed cards
             if i in self.revealed_cards[opponent]:
-                _, rank = card  # Ignore suit, only use rank
-                # Store opponent cards in second 13 positions
-                obs[13 + rank] = 1.0
-                # Mark opponent card as revealed
-                obs[38 + i] = 1.0
-                
+                start_idx = 18 + (i * 3)  # Start after player's 18 elements
+                encode_card(card, start_idx)
+                # Set revealed flag
+                obs[42 + i] = 1.0
+        
         # Encode discard pile top card
         if self.discard_pile:
-            _, rank = self.discard_pile[-1]  # Ignore suit
-            obs[44] = 1.0  # Set flag that discard pile has a card
-            obs[45 + rank] = 1.0  # Store rank in dedicated discard section
+            encode_card(self.discard_pile[-1], 48)
         
-        # Encode if drawn card exists
+        # Encode drawn card
         if self.drawn_card is not None:
-            _, rank = self.drawn_card  # Ignore suit
-            obs[58] = 1.0  # Flag indicating drawn card exists
-            obs[rank] = 1.0  # Show drawn card in player's card section
+            encode_card(self.drawn_card, 51)
             
-        # Encode if in final round
+            # Set drawn from discard flag
+            if self.drawn_from_discard:
+                obs[54] = 1.0
+        
+        # Set final round flag
         if self.final_round:
-            obs[59] = 1.0
+            obs[55] = 1.0
             
         return obs
     

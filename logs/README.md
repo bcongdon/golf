@@ -32,6 +32,17 @@ The training process tracks and visualizes the following metrics:
 8. **Score Difference**: Difference between agent's score and random opponent's score
 9. **Learning Rate Adjustments**: Changes in learning rate during training
 
+## Exploration Strategy
+
+The agent uses a piecewise epsilon decay strategy for exploration:
+
+1. **Warmup Phase**: For the first N episodes (controlled by `--epsilon-warmup`), epsilon remains at the starting value (typically 1.0) to encourage thorough exploration of the state space.
+2. **Decay Phase**: After the warmup period, epsilon decays according to either:
+   - Exponential decay: `epsilon = epsilon * epsilon_decay` (for slow decay rates)
+   - Alternative formula: `epsilon = epsilon_end + (1.0 - epsilon_end) * exp(-decay_rate * (episode - warmup))` (for faster decay)
+
+This strategy ensures that the agent explores thoroughly in the early stages of training before gradually focusing on exploitation of learned strategies.
+
 ## Using the Logs
 
 The logs and charts can be used to:

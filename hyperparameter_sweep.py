@@ -48,6 +48,7 @@ def get_default_sweep_config():
         "epsilon_start": [1.0],
         "epsilon_end": [0.01, 0.05],
         "epsilon_decay": [0.9995, 0.9998],
+        "epsilon_warmup": [500, 1000, 2000],
         "learn_every": [1, 4, 8],
         "target_update": [500, 1000, 2000]
     }
@@ -363,7 +364,7 @@ def create_parameter_importance_plots(results_df, output_dir):
     
     # Parameters to analyze
     params = ['lr', 'batch_size', 'hidden_size', 'gamma', 
-              'epsilon_decay', 'learn_every', 'target_update']
+              'epsilon_decay', 'epsilon_warmup', 'learn_every', 'target_update']
     
     # Metrics to analyze
     metrics = ['best_score_diff', 'best_win_rate', 'final_win_rate']
@@ -477,8 +478,17 @@ def create_best_config_script(results_df, output_dir):
             continue
         
         # Convert parameter name from snake_case to --kebab-case
-        param_name = f"--{key.replace('_', '-')}"
-        script_content += f"    {param_name} {value} \\\n"
+        param_name = key.replace('_', '-')
+        
+        # Special handling for certain parameters
+        if key == 'lr':
+            script_content += f"    --{param_name} {value} \\\n"
+        elif key in ['batch_size', 'hidden_size', 'target_update', 'learn_every', 'epsilon_warmup']:
+            script_content += f"    --{param_name} {int(value)} \\\n"
+        elif key in ['gamma', 'epsilon_start', 'epsilon_end', 'epsilon_decay']:
+            script_content += f"    --{param_name} {float(value)} \\\n"
+        else:
+            script_content += f"    --{param_name} {value} \\\n"
     
     # Add mixed precision for faster training
     script_content += "    --mixed-precision \\\n"
@@ -696,7 +706,7 @@ def create_html_report(results_df, output_dir):
     
     # Create parallel coordinates plot
     params = ['lr', 'batch_size', 'hidden_size', 'gamma', 
-              'epsilon_decay', 'learn_every', 'target_update']
+              'epsilon_decay', 'epsilon_warmup', 'learn_every', 'target_update']
     metrics = ['best_score_diff', 'best_win_rate', 'final_win_rate']
     
     # Prepare data for parallel coordinates

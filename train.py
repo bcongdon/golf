@@ -45,11 +45,12 @@ def parse_args():
     parser.add_argument('--episodes', type=int, default=20000, help='Number of episodes to train')
     parser.add_argument('--batch-size', type=int, default=256, help='Batch size for training')
     parser.add_argument('--hidden-size', type=int, default=512, help='Hidden size of the neural network')
-    parser.add_argument('--lr', type=float, default=0.0001, help='Learning rate')
-    parser.add_argument('--gamma', type=float, default=0.99, help='Discount factor')
+    parser.add_argument('--lr', type=float, default=1e-4, help='Learning rate')
+    parser.add_argument('--gamma', type=float, default=0.95, help='Discount factor')
     parser.add_argument('--epsilon-start', type=float, default=1.0, help='Starting epsilon for exploration')
     parser.add_argument('--epsilon-end', type=float, default=0.01, help='Minimum epsilon for exploration')
-    parser.add_argument('--epsilon-decay', type=float, default=0.9995, help='Decay rate for epsilon')
+    parser.add_argument('--epsilon-decay', type=float, default=0.9999, help='Decay rate for epsilon')
+    parser.add_argument('--epsilon-warmup', type=int, default=5000, help='Number of episodes to keep epsilon at start value')
     parser.add_argument('--target-update', type=int, default=1000, help='Target network update frequency')
     parser.add_argument('--eval-interval', type=int, default=500, help='Evaluation interval')
     parser.add_argument('--save-dir', type=str, default='models', help='Directory to save models')
@@ -96,6 +97,9 @@ def evaluate_agent(agent, num_episodes=100, logger=None):
     opponent_scores = []
     average_score_diff = 0  # How much better the agent is than opponents
     
+    # Track Q-values during evaluation
+    q_values_list = []
+    
     # Set agent to evaluation mode
     agent.q_network.eval()
     
@@ -125,6 +129,14 @@ def evaluate_agent(agent, num_episodes=100, logger=None):
                 valid_actions = env._get_valid_actions()
                 # Use torch.no_grad() to avoid tracking gradients during evaluation
                 with torch.no_grad():
+                    # Get Q-values for all actions
+                    state_tensor = torch.FloatTensor(state).unsqueeze(0).to(agent.device)
+                    q_vals = agent.q_network(state_tensor).cpu().numpy()[0]
+                    
+                    # Record Q-values for valid actions
+                    valid_q = [q_vals[action] for action in valid_actions]
+                    q_values_list.extend(valid_q)
+                    
                     action = agent.select_action(state, valid_actions, training=False)
             else:
                 # Opponent's turn (random policy)
@@ -190,8 +202,20 @@ def evaluate_agent(agent, num_episodes=100, logger=None):
     
     # Set agent back to training mode
     agent.q_network.train()
+    
+    # Calculate Q-value statistics
+    q_stats = {}
+    if q_values_list:
+        q_stats = {
+            'mean': np.mean(q_values_list),
+            'min': np.min(q_values_list),
+            'max': np.max(q_values_list),
+            'std': np.std(q_values_list)
+        }
+        if logger:
+            logger.info(f"Evaluation Q-values - Mean: {q_stats['mean']:.4f}, Min: {q_stats['min']:.4f}, Max: {q_stats['max']:.4f}, Std: {q_stats['std']:.4f}")
         
-    return avg_reward, win_rate, loss_rate, max_turns_rate, avg_agent_score, score_diff
+    return avg_reward, win_rate, loss_rate, max_turns_rate, avg_agent_score, score_diff, q_stats
 
 def train(args, logger, logs_dir):
     """Train the DQN agent."""
@@ -217,6 +241,7 @@ def train(args, logger, logs_dir):
         epsilon_start=args.epsilon_start,
         epsilon_end=args.epsilon_end,
         epsilon_decay=args.epsilon_decay,
+        epsilon_warmup_episodes=args.epsilon_warmup,
         batch_size=args.batch_size,
         target_update=args.target_update,
         # PER parameters
@@ -279,6 +304,12 @@ def train(args, logger, logs_dir):
     eval_avg_scores = []
     eval_score_diffs = []
     
+    # New metrics for epsilon and Q-values
+    epsilon_history = []
+    q_value_avg = []
+    q_value_min = []
+    q_value_max = []
+    
     # Learning rate history
     lr_history = []
     lr_history_episodes = []
@@ -297,47 +328,58 @@ def train(args, logger, logs_dir):
     
     # Function to save charts
     def save_charts(episode):
-        plt.figure(figsize=(15, 15))  # Increased height for more plots
+        plt.figure(figsize=(15, 20))  # Increased height for more plots
         
-        plt.subplot(3, 3, 1)
+        # Row 1: Basic training metrics
+        plt.subplot(4, 3, 1)
         plt.plot(rewards)
         plt.title('Episode Rewards')
         plt.xlabel('Episode')
         plt.ylabel('Reward')
         
-        plt.subplot(3, 3, 2)
+        plt.subplot(4, 3, 2)
         plt.plot(losses)
         plt.title('Training Loss')
         plt.xlabel('Episode')
         plt.ylabel('Loss')
         
+        # Add epsilon plot
+        plt.subplot(4, 3, 3)
+        plt.plot(epsilon_history)
+        plt.title('Exploration Rate (Epsilon)')
+        plt.xlabel('Episode')
+        plt.ylabel('Epsilon')
+        
+        # Row 2: Evaluation metrics
         if eval_rewards:
-            plt.subplot(3, 3, 3)
+            plt.subplot(4, 3, 4)
             plt.plot(range(0, len(eval_rewards) * args.eval_interval, args.eval_interval), eval_rewards)
             plt.title('Evaluation Rewards')
             plt.xlabel('Episode')
             plt.ylabel('Average Reward')
             
-            plt.subplot(3, 3, 4)
+            plt.subplot(4, 3, 5)
             plt.plot(range(0, len(eval_win_rates) * args.eval_interval, args.eval_interval), eval_win_rates)
             plt.title('Win Rate vs Random Opponent')
             plt.xlabel('Episode')
             plt.ylabel('Win Rate')
             
-            plt.subplot(3, 3, 5)
+            plt.subplot(4, 3, 6)
             plt.plot(range(0, len(eval_loss_rates) * args.eval_interval, args.eval_interval), eval_loss_rates)
             plt.title('Loss Rate vs Random Opponent')
             plt.xlabel('Episode')
             plt.ylabel('Loss Rate')
-            
-            plt.subplot(3, 3, 6)
+        
+        # Row 3: More evaluation metrics
+        if eval_rewards:
+            plt.subplot(4, 3, 7)
             plt.plot(range(0, len(eval_max_turns_rates) * args.eval_interval, args.eval_interval), eval_max_turns_rates)
             plt.title('Max Turns Rate')
             plt.xlabel('Episode')
             plt.ylabel('Rate of Games Reaching Max Turns')
             
-            # New plots for Golf-specific metrics
-            plt.subplot(3, 3, 7)
+            # Golf-specific metrics
+            plt.subplot(4, 3, 8)
             eval_episodes = range(0, len(eval_avg_scores) * args.eval_interval, args.eval_interval)
             plt.plot(eval_episodes, eval_avg_scores, label='Agent')
             # Add a baseline of a random agent (based on opponent's average score)
@@ -350,13 +392,24 @@ def train(args, logger, logs_dir):
             plt.ylabel('Score')
             plt.legend()
             
-            plt.subplot(3, 3, 8)
+            plt.subplot(4, 3, 9)
             plt.plot(eval_episodes, eval_score_diffs)
             plt.title('Score Difference (Agent vs Random)')
             plt.xlabel('Episode')
             plt.ylabel('Score Diff (Positive = Better)')
         
-        plt.subplot(3, 3, 9)
+        # Row 4: Q-value metrics and learning rate
+        if q_value_avg:
+            plt.subplot(4, 3, 10)
+            plt.plot(q_value_avg, label='Average')
+            plt.plot(q_value_min, label='Min')
+            plt.plot(q_value_max, label='Max')
+            plt.title('Q-Value Statistics')
+            plt.xlabel('Episode')
+            plt.ylabel('Q-Value')
+            plt.legend()
+        
+        plt.subplot(4, 3, 11)
         # Plot agent's current learning rate
         plt.plot(lr_history_episodes, lr_history)
         plt.title('Learning Rate Adjustments')
@@ -387,7 +440,11 @@ def train(args, logger, logs_dir):
         # Save training metrics
         train_data = {
             'Episode': range(len(rewards)),
-            'Reward': rewards
+            'Reward': rewards,
+            'Epsilon': epsilon_history if len(epsilon_history) == len(rewards) else epsilon_history + [None] * (len(rewards) - len(epsilon_history)),
+            'Q_Avg': q_value_avg + [None] * (len(rewards) - len(q_value_avg)),
+            'Q_Min': q_value_min + [None] * (len(rewards) - len(q_value_min)),
+            'Q_Max': q_value_max + [None] * (len(rewards) - len(q_value_max))
         }
         if losses:
             train_data['Loss'] = losses + [None] * (len(rewards) - len(losses))
@@ -477,6 +534,43 @@ def train(args, logger, logs_dir):
     # Pre-allocate memory for experiences
     experiences_batch = []
     experiences_capacity = learn_every * 2  # Double capacity to avoid frequent resizing
+    
+    # Function to sample Q-values for monitoring
+    def sample_q_values(agent, env, num_samples=10):
+        """Sample Q-values from random states to monitor network behavior."""
+        q_values = []
+        
+        # Reset environment to get a valid initial state
+        state = env.reset()
+        
+        # Collect Q-values from multiple states
+        for _ in range(num_samples):
+            # Get valid actions for this state
+            valid_actions = env._get_valid_actions()
+            
+            # Get Q-values for all actions
+            state_tensor = torch.FloatTensor(state).unsqueeze(0).to(agent.device)
+            with torch.no_grad():
+                q_vals = agent.q_network(state_tensor).cpu().numpy()[0]
+            
+            # Only consider valid actions
+            valid_q = [q_vals[action] for action in valid_actions]
+            
+            if valid_q:  # Only append if we have valid actions
+                q_values.extend(valid_q)
+            
+            # Take a random action to get to a new state
+            action = random.choice(valid_actions)
+            state, _, done, _ = env.step(action)
+            
+            # If episode ended, reset
+            if done:
+                state = env.reset()
+        
+        if not q_values:  # Safety check
+            return 0, 0, 0
+            
+        return np.mean(q_values), np.min(q_values), np.max(q_values)
     
     logger.info("Starting training loop")
     for episode in tqdm(range(args.episodes)):
@@ -616,16 +710,20 @@ def train(args, logger, logs_dir):
             avg_loss = sum(episode_losses) / len(episode_losses)
             losses.append(avg_loss)
             
-        # Ensure epsilon decays even if learning doesn't happen often enough
-        # Use a more gradual decay formula to stretch it over more episodes
-        # This will decay from 1.0 to 0.01 over approximately 10000 episodes
-        # Formula: epsilon = epsilon_end + (epsilon_start - epsilon_end) * exp(-decay_rate * episode)
-        decay_rate = 0.0003  # Adjusted for ~10000 episodes decay (slower)
-        episode_fraction = (episode + 1) / args.episodes
-        agent.epsilon = max(
-            agent.epsilon_end,
-            agent.epsilon_end + (args.epsilon_start - agent.epsilon_end) * np.exp(-decay_rate * (episode + 1))
-        )
+        agent.update_epsilon()
+            
+        # Record epsilon value
+        epsilon_history.append(agent.epsilon)
+        
+        # Sample Q-values periodically (every 100 episodes)
+        if episode % 100 == 0:
+            # Create a temporary environment for sampling to avoid affecting training
+            temp_env = GolfGame(num_players=2)
+            avg_q, min_q, max_q = sample_q_values(agent, temp_env)
+            q_value_avg.append(avg_q)
+            q_value_min.append(min_q)
+            q_value_max.append(max_q)
+            logger.debug(f"Q-value stats - Avg: {avg_q:.4f}, Min: {min_q:.4f}, Max: {max_q:.4f}")
         
         # Implement learning rate annealing
         # Gradually reduce learning rate as training progresses
@@ -667,7 +765,7 @@ def train(args, logger, logs_dir):
         # Evaluate agent periodically
         if (episode + 1) % args.eval_interval == 0:
             eval_results = evaluate_agent(agent, logger=logger)
-            avg_reward, win_rate, loss_rate, max_turns_rate, avg_score, score_diff = eval_results
+            avg_reward, win_rate, loss_rate, max_turns_rate, avg_score, score_diff, q_stats = eval_results
             
             # Store metrics for plotting
             eval_rewards.append(avg_reward)

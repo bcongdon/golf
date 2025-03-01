@@ -386,20 +386,21 @@ class DQNAgent:
     
     def __init__(
         self,
-        state_size: int = 56,  # Updated for 3-element card representation
-        action_size: int = 9,
-        hidden_size: int = 512,  # Increased from 256 to 512
-        learning_rate: float = 0.0001,  # Reduced from 0.0005 to 0.0001 for more stable learning
-        gamma: float = 0.99,  # Discount factor
-        epsilon_start: float = 1.0,
-        epsilon_end: float = 0.01,  # Reduced from 0.05 to 0.01 for more exploitation in late stages
-        epsilon_decay: float = 0.9995,  # Adjusted for slower decay
-        buffer_size: int = 100000,  # Increased from 50000 to 100000
-        batch_size: int = 256,  # Increased from 128 to 256
-        target_update: int = 1000,  # Increased from 500 to 1000
-        per_alpha: float = 0.7,  # Prioritization exponent
-        per_beta: float = 0.5,  # Importance sampling start value
-        per_beta_increment: float = 0.0001  # Beta increment per learning step
+        state_size: int = 56,  # Size of the observation space (card representation)
+        action_size: int = 9,  # Number of possible actions in the game
+        hidden_size: int = 512,  # Size of hidden layers in neural network
+        learning_rate: float = 0.0001,  # Learning rate for optimizer
+        gamma: float = 0.99,  # Discount factor for future rewards
+        epsilon_start: float = 1.0,  # Initial exploration rate
+        epsilon_end: float = 0.01,  # Minimum exploration rate
+        epsilon_decay: float = 0.9995,  # Rate at which exploration decreases
+        epsilon_warmup_episodes: int = 1000,  # Number of episodes to keep epsilon at start value
+        buffer_size: int = 100000,  # Size of replay memory
+        batch_size: int = 256,  # Number of samples per training batch
+        target_update: int = 250,  # Frequency of target network updates
+        per_alpha: float = 0.7,  # Prioritization exponent for replay buffer
+        per_beta: float = 0.5,  # Initial importance sampling correction
+        per_beta_increment: float = 0.0001  # Increment for beta parameter over time
     ):
         self.state_size = state_size
         self.action_size = action_size
@@ -411,6 +412,8 @@ class DQNAgent:
         self.epsilon = epsilon_start
         self.epsilon_end = epsilon_end
         self.epsilon_decay = epsilon_decay
+        self.epsilon_warmup_episodes = epsilon_warmup_episodes
+        self.current_episode = 0  # Track current episode for epsilon warmup
         
         # Replay buffer
         self.buffer_size = buffer_size
@@ -703,6 +706,7 @@ class DQNAgent:
             'target_network': self.target_network.state_dict(),
             'optimizer': self.optimizer.state_dict(),
             'epsilon': self.epsilon,
+            'current_episode': self.current_episode,  # Save current episode for warmup tracking
             # Don't save the buffer itself, but save the PER parameters
             'per_alpha': self.memory.alpha,
             'per_beta': self.memory.beta,
@@ -719,6 +723,10 @@ class DQNAgent:
         self.optimizer.load_state_dict(checkpoint['optimizer'])
         self.epsilon = checkpoint['epsilon']
         
+        # Load current episode if available
+        if 'current_episode' in checkpoint:
+            self.current_episode = checkpoint['current_episode']
+        
         # If the saved model has PER parameters, load them
         if 'per_alpha' in checkpoint and 'per_beta' in checkpoint and 'per_max_priority' in checkpoint:
             self.memory.alpha = checkpoint['per_alpha']
@@ -727,4 +735,37 @@ class DQNAgent:
             
         # Load AMP scaler if available and using mixed precision
         if self.use_amp and 'amp_scaler' in checkpoint and checkpoint['amp_scaler'] is not None:
-            self.scaler.load_state_dict(checkpoint['amp_scaler']) 
+            self.scaler.load_state_dict(checkpoint['amp_scaler'])
+            
+    def update_epsilon(self, decay_rate=None):
+        """
+        Update epsilon using a piecewise strategy:
+        - Keep epsilon at epsilon_start for epsilon_warmup_episodes
+        - Then decay according to the decay formula
+        
+        Args:
+            decay_rate: Optional custom decay rate (if None, use self.epsilon_decay)
+        """
+        # Increment episode counter
+        self.current_episode += 1
+        
+        # During warmup period, keep epsilon at start value
+        if self.current_episode <= self.epsilon_warmup_episodes:
+            # Keep epsilon at start value
+            return
+        
+        # After warmup, apply decay
+        if decay_rate is None:
+            # Use exponential decay with epsilon_decay parameter
+            self.epsilon = max(
+                self.epsilon_end,
+                self.epsilon * self.epsilon_decay
+            )
+        else:
+            # Use alternative decay formula if provided
+            # Formula: epsilon = epsilon_end + (epsilon_start - epsilon_end) * exp(-decay_rate * (episode - warmup))
+            post_warmup_episode = self.current_episode - self.epsilon_warmup_episodes
+            self.epsilon = max(
+                self.epsilon_end,
+                self.epsilon_end + (1.0 - self.epsilon_end) * np.exp(-decay_rate * post_warmup_episode)
+            ) 

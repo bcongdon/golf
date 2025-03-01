@@ -42,15 +42,15 @@ def setup_logging(log_level):
 
 def parse_args():
     parser = argparse.ArgumentParser(description='Train a DQN agent to play Golf')
-    parser.add_argument('--episodes', type=int, default=20000, help='Number of episodes to train')
+    parser.add_argument('--episodes', type=int, default=25000, help='Number of episodes to train')
     parser.add_argument('--batch-size', type=int, default=256, help='Batch size for training')
     parser.add_argument('--hidden-size', type=int, default=512, help='Hidden size of the neural network')
     parser.add_argument('--lr', type=float, default=1e-4, help='Learning rate')
     parser.add_argument('--gamma', type=float, default=0.95, help='Discount factor')
     parser.add_argument('--epsilon-start', type=float, default=1.0, help='Starting epsilon for exploration')
     parser.add_argument('--epsilon-end', type=float, default=0.01, help='Minimum epsilon for exploration')
-    parser.add_argument('--epsilon-decay', type=float, default=0.9999, help='Decay rate for epsilon')
-    parser.add_argument('--epsilon-warmup', type=int, default=5000, help='Number of episodes to keep epsilon at start value')
+    parser.add_argument('--epsilon-decay-episodes', type=int, default=15000, help='Number of episodes to decay epsilon from start to end')
+    parser.add_argument('--epsilon-warmup', type=int, default=4000, help='Number of episodes to keep epsilon at start value')
     parser.add_argument('--target-update', type=int, default=1000, help='Target network update frequency')
     parser.add_argument('--eval-interval', type=int, default=500, help='Evaluation interval')
     parser.add_argument('--save-dir', type=str, default='models', help='Directory to save models')
@@ -141,7 +141,8 @@ def evaluate_agent(agent, num_episodes=100, logger=None):
             else:
                 # Opponent's turn (random policy)
                 valid_actions = env._get_valid_actions()
-                action = random.choice(valid_actions)
+                # Use the common random policy implementation
+                action = agent.random_action(valid_actions)
             
             next_state, reward, done, info = env.step(action)
             
@@ -240,7 +241,7 @@ def train(args, logger, logs_dir):
         gamma=args.gamma,
         epsilon_start=args.epsilon_start,
         epsilon_end=args.epsilon_end,
-        epsilon_decay=args.epsilon_decay,
+        epsilon_decay_episodes=args.epsilon_decay_episodes,
         epsilon_warmup_episodes=args.epsilon_warmup,
         batch_size=args.batch_size,
         target_update=args.target_update,
@@ -484,8 +485,8 @@ def train(args, logger, logs_dir):
     # Function to select opponent action (to avoid code duplication)
     def select_opponent_action(state, valid_actions):
         if random.random() < random_opponent_prob:
-            # Use random opponent
-            return random.choice(valid_actions)
+            # Use random opponent with common random policy
+            return agent.random_action(valid_actions)
         elif opponent_pool and random.random() < 0.7:  # 70% chance to use pool when available
             # Use an agent from the opponent pool
             opponent_idx = random.randint(0, len(opponent_pool) - 1)
@@ -710,6 +711,7 @@ def train(args, logger, logs_dir):
             avg_loss = sum(episode_losses) / len(episode_losses)
             losses.append(avg_loss)
             
+        # Update epsilon using piecewise linear decay strategy
         agent.update_epsilon()
             
         # Record epsilon value

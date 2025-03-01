@@ -34,14 +34,19 @@ The training process tracks and visualizes the following metrics:
 
 ## Exploration Strategy
 
-The agent uses a piecewise epsilon decay strategy for exploration:
+The agent uses a piecewise linear epsilon decay strategy for exploration:
 
 1. **Warmup Phase**: For the first N episodes (controlled by `--epsilon-warmup`), epsilon remains at the starting value (typically 1.0) to encourage thorough exploration of the state space.
-2. **Decay Phase**: After the warmup period, epsilon decays according to either:
-   - Exponential decay: `epsilon = epsilon * epsilon_decay` (for slow decay rates)
-   - Alternative formula: `epsilon = epsilon_end + (1.0 - epsilon_end) * exp(-decay_rate * (episode - warmup))` (for faster decay)
+2. **Decay Phase**: After the warmup period, epsilon decays linearly from the starting value to the end value over a specified number of episodes (controlled by `--epsilon-decay-episodes`).
 
-This strategy ensures that the agent explores thoroughly in the early stages of training before gradually focusing on exploitation of learned strategies.
+This strategy ensures that the agent explores thoroughly in the early stages of training before gradually focusing on exploitation of learned strategies. The linear decay makes it easier to understand and control the exploration schedule compared to exponential decay rates.
+
+For example, with default settings:
+
+- Epsilon starts at 1.0
+- Remains at 1.0 for the first 5,000 episodes (warmup)
+- Then linearly decays to 0.01 over the next 10,000 episodes
+- Reaches minimum value of 0.01 after episode 15,000
 
 ## Using the Logs
 

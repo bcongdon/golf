@@ -393,7 +393,7 @@ class DQNAgent:
         gamma: float = 0.99,  # Discount factor for future rewards
         epsilon_start: float = 1.0,  # Initial exploration rate
         epsilon_end: float = 0.01,  # Minimum exploration rate
-        epsilon_decay: float = 0.9995,  # Rate at which exploration decreases
+        epsilon_decay_episodes: int = 10000,  # Number of episodes to decay epsilon from start to end
         epsilon_warmup_episodes: int = 1000,  # Number of episodes to keep epsilon at start value
         buffer_size: int = 100000,  # Size of replay memory
         batch_size: int = 256,  # Number of samples per training batch
@@ -410,8 +410,9 @@ class DQNAgent:
         
         # Exploration parameters
         self.epsilon = epsilon_start
+        self.epsilon_start = epsilon_start
         self.epsilon_end = epsilon_end
-        self.epsilon_decay = epsilon_decay
+        self.epsilon_decay_episodes = epsilon_decay_episodes
         self.epsilon_warmup_episodes = epsilon_warmup_episodes
         self.current_episode = 0  # Track current episode for epsilon warmup
         
@@ -461,6 +462,29 @@ class DQNAgent:
         if self.use_amp:
             self.scaler = torch.cuda.amp.GradScaler()
     
+    @staticmethod
+    def random_action(valid_actions: List[int]) -> int:
+        """
+        Common implementation of random policy for both exploration and evaluation.
+        Uses a 50/50 split between drawing a new card and using the discard pile in the draw phase.
+        
+        Args:
+            valid_actions: List of valid actions
+            
+        Returns:
+            Selected action
+        """
+        # Check if we're in the draw phase (both actions 0 and 1 are valid)
+        if 0 in valid_actions and 1 in valid_actions:
+            # Draw phase: 50/50 split between drawing from deck (0) and discard pile (1)
+            if random.random() < 0.5:
+                return 0  # Draw from deck
+            else:
+                return 1  # Take from discard pile
+        else:
+            # Not in draw phase, choose randomly from valid actions
+            return random.choice(valid_actions)
+    
     def select_action(self, state: np.ndarray, valid_actions: List[int], training: bool = True) -> int:
         """
         Select an action using an improved exploration strategy.
@@ -491,23 +515,26 @@ class DQNAgent:
         if training:
             # Exploration strategies
             if random.random() < self.epsilon:
-                # Different exploration strategies based on game phase
-                if 0 in valid_actions and 1 in valid_actions:  # Drawing phase
-                    # Encourage trying both draw from deck and discard pile
-                    # Bias slightly toward taking from discard pile when available
-                    # since it provides more information
-                    if random.random() < 0.6:
-                        return 1  # Take from discard pile
-                    else:
-                        return 0  # Draw from deck
-                else:
-                    return random.choice(valid_actions)
+                # Use common random policy for exploration
+                return self.random_action(valid_actions)
             else:
                 # Exploitation with softmax exploration
                 # Apply temperature to Q-values
                 temperature = max(0.5, 1.0 - self.epsilon)  # Lower temperature as epsilon decreases
-                exp_q = np.exp(np.array(list(valid_q.values())) / temperature)
-                probs = exp_q / np.sum(exp_q)
+                
+                # Numerically stable softmax implementation
+                q_values_array = np.array(list(valid_q.values())) / temperature
+                # Subtract max value for numerical stability
+                q_values_array = q_values_array - np.max(q_values_array)
+                # Apply exp with clipping to prevent overflow
+                exp_q = np.exp(np.clip(q_values_array, -20, 20))
+                # Normalize to get probabilities
+                sum_exp_q = np.sum(exp_q)
+                if sum_exp_q > 0:  # Ensure we don't divide by zero
+                    probs = exp_q / sum_exp_q
+                else:
+                    # Fallback to uniform distribution if all values are extremely negative
+                    probs = np.ones_like(exp_q) / len(exp_q)
                 
                 # Sample action based on softmax probabilities
                 actions = list(valid_q.keys())
@@ -693,10 +720,7 @@ class DQNAgent:
             # Use faster in-place copy for target network update
             for target_param, param in zip(self.target_network.parameters(), self.q_network.parameters()):
                 target_param.data.copy_(param.data)
-        
-        # Decay epsilon
-        self.epsilon = max(self.epsilon_end, self.epsilon * self.epsilon_decay)
-        
+    
         return loss.item()
     
     def save(self, path: str):
@@ -706,6 +730,10 @@ class DQNAgent:
             'target_network': self.target_network.state_dict(),
             'optimizer': self.optimizer.state_dict(),
             'epsilon': self.epsilon,
+            'epsilon_start': self.epsilon_start,
+            'epsilon_end': self.epsilon_end,
+            'epsilon_decay_episodes': self.epsilon_decay_episodes,
+            'epsilon_warmup_episodes': self.epsilon_warmup_episodes,
             'current_episode': self.current_episode,  # Save current episode for warmup tracking
             # Don't save the buffer itself, but save the PER parameters
             'per_alpha': self.memory.alpha,
@@ -723,6 +751,16 @@ class DQNAgent:
         self.optimizer.load_state_dict(checkpoint['optimizer'])
         self.epsilon = checkpoint['epsilon']
         
+        # Load epsilon parameters if available
+        if 'epsilon_start' in checkpoint:
+            self.epsilon_start = checkpoint['epsilon_start']
+        if 'epsilon_end' in checkpoint:
+            self.epsilon_end = checkpoint['epsilon_end']
+        if 'epsilon_decay_episodes' in checkpoint:
+            self.epsilon_decay_episodes = checkpoint['epsilon_decay_episodes']
+        if 'epsilon_warmup_episodes' in checkpoint:
+            self.epsilon_warmup_episodes = checkpoint['epsilon_warmup_episodes']
+        
         # Load current episode if available
         if 'current_episode' in checkpoint:
             self.current_episode = checkpoint['current_episode']
@@ -737,35 +775,31 @@ class DQNAgent:
         if self.use_amp and 'amp_scaler' in checkpoint and checkpoint['amp_scaler'] is not None:
             self.scaler.load_state_dict(checkpoint['amp_scaler'])
             
-    def update_epsilon(self, decay_rate=None):
+    def update_epsilon(self):
         """
         Update epsilon using a piecewise strategy:
         - Keep epsilon at epsilon_start for epsilon_warmup_episodes
-        - Then decay according to the decay formula
-        
-        Args:
-            decay_rate: Optional custom decay rate (if None, use self.epsilon_decay)
+        - Then use exponential decay from epsilon_start to epsilon_end over epsilon_decay_episodes
         """
         # Increment episode counter
         self.current_episode += 1
         
         # During warmup period, keep epsilon at start value
         if self.current_episode <= self.epsilon_warmup_episodes:
-            # Keep epsilon at start value
+            self.epsilon = self.epsilon_start
             return
         
-        # After warmup, apply decay
-        if decay_rate is None:
-            # Use exponential decay with epsilon_decay parameter
-            self.epsilon = max(
-                self.epsilon_end,
-                self.epsilon * self.epsilon_decay
-            )
-        else:
-            # Use alternative decay formula if provided
-            # Formula: epsilon = epsilon_end + (epsilon_start - epsilon_end) * exp(-decay_rate * (episode - warmup))
-            post_warmup_episode = self.current_episode - self.epsilon_warmup_episodes
-            self.epsilon = max(
-                self.epsilon_end,
-                self.epsilon_end + (1.0 - self.epsilon_end) * np.exp(-decay_rate * post_warmup_episode)
-            ) 
+        # After warmup, apply exponential decay
+        # Calculate how many episodes into the decay period we are
+        decay_episodes = self.current_episode - self.epsilon_warmup_episodes
+        
+        # Calculate decay rate to reach epsilon_end after epsilon_decay_episodes
+        # Using the formula: epsilon_end = epsilon_start * (decay_rate ^ epsilon_decay_episodes)
+        # So decay_rate = (epsilon_end / epsilon_start) ^ (1 / epsilon_decay_episodes)
+        decay_rate = (self.epsilon_end / self.epsilon_start) ** (1.0 / self.epsilon_decay_episodes)
+        
+        # Apply exponential decay
+        self.epsilon = self.epsilon_start * (decay_rate ** min(decay_episodes, self.epsilon_decay_episodes))
+        
+        # Ensure we don't go below epsilon_end
+        self.epsilon = max(self.epsilon_end, self.epsilon) 

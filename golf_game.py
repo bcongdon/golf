@@ -8,23 +8,25 @@ class GolfGame:
     
     In this version of Golf:
     - Each player has a 2x3 grid of cards (6 cards total)
-    - Cards are standard deck (A-K in four suits)
+    - Cards are represented by rank only (A-K), suits are ignored
     - Aces are worth 1, number cards are face value, face cards (J,Q,K) are worth 10
     - Matching cards in the same column cancel out (worth 0)
     - The goal is to have the lowest total score
     """
     
-    def __init__(self, num_players: int = 2):
+    def __init__(self, num_players: int = 2, normalize_rewards: bool = True):
         self.num_players = num_players
+        self.normalize_rewards = normalize_rewards
         self.reset()
     
     def reset(self) -> np.ndarray:
         """Reset the game to initial state and return the initial observation."""
-        # Initialize a standard deck of cards
+        # Initialize a deck of cards (ranks only, no suits)
+        # We'll create 4 copies of each rank to simulate a standard deck
         self.deck = []
-        for suit in range(4):  # 0-3 for clubs, diamonds, hearts, spades
+        for _ in range(4):  # 4 copies of each rank (simulating suits)
             for rank in range(13):  # 0-12 for A-K
-                self.deck.append((suit, rank))
+                self.deck.append(rank)
         random.shuffle(self.deck)
         
         # Deal cards to players (2x3 grid for each player)
@@ -59,9 +61,8 @@ class GolfGame:
         
         return self._get_observation()
     
-    def _card_value(self, card: Tuple[int, int]) -> int:
-        """Calculate the value of a card."""
-        _, rank = card
+    def _card_value(self, rank: int) -> int:
+        """Calculate the value of a card based on its rank."""
         if rank == 0:  # Ace
             return 1
         if rank == 1:  # 2 is worth -2
@@ -82,9 +83,9 @@ class GolfGame:
             card2 = hand[col + 3]
             
             # If ranks match, they cancel out
-            if card1[1] == card2[1]:
+            if card1 == card2:
                 # Special case for 2s
-                if card1[1] == 1:
+                if card1 == 1:
                     score -= 4
                 continue
             else:
@@ -94,90 +95,58 @@ class GolfGame:
     
     def _get_observation(self) -> np.ndarray:
         """
-        Convert the game state to a neural network input representation.
+        Convert the game state to a neural network input representation using card indices.
         
-        Each card is represented as a 3-element vector:
-        - Rank (1-13): Ace=1, 2=2, ..., King=13 (normalized to [0,1])
-        - Wild Flag (0 or 1): 1 if the card is a 2 (wild), otherwise 0
-        - Point Value (-2 to 10): The actual score value of the card in the game (normalized to [0,1])
+        Each card is represented by its rank index (0-12 for A-K), with 13 representing unknown/hidden cards.
         
         The observation includes:
-        - Current player's hand (6 cards * 3 values = 18 elements)
-        - Opponent's visible cards (6 cards * 3 values = 18 elements)
-        - Discard pile top card (3 elements)
-        - Drawn card (3 elements)
-        - Revealed flags for player (6 elements)
-        - Revealed flags for opponent (6 elements)
-        - Game state flags (2 elements: drawn_from_discard, final_round)
+        - Current player's hand (6 card indices)
+        - Opponent's visible cards (6 card indices, 13 for hidden)
+        - Discard pile top card (1 card index)
+        - Drawn card (1 card index)
+        - Revealed flags for player (6 binary values)
+        - Revealed flags for opponent (6 binary values)
+        - Game state flags (2 binary values: drawn_from_discard, final_round)
         
-        Total: 56 dimensions
+        Total: 28 dimensions
         """
-        # Initialize observation array
-        obs = np.zeros((56,), dtype=np.float32)
+        # Initialize observation array with unknown card value (13) for all card positions
+        # First 14 elements are card indices, last 14 are binary features
+        obs = np.zeros(28, dtype=np.float32)
+        obs[:14] = 13  # Set all card positions to "unknown" by default
         
-        # Helper function to encode a single card with normalization
-        def encode_card(card, start_idx):
-            suit, rank = card
-            # Convert from 0-indexed to 1-indexed rank and normalize to [0,1]
-            # Rank range: 1-13 -> normalized to [0,1]
-            rank_value = (rank + 1) / 13.0
-            
-            # Set wild flag (1 if it's a 2, which is rank 1 in 0-indexed)
-            wild_flag = 1.0 if rank == 1 else 0.0
-            
-            # Calculate point value
-            if rank == 0:  # Ace
-                point_value = 1.0
-            elif rank == 1:  # 2 (wild)
-                point_value = -2.0
-            elif rank < 10:  # 3-10
-                point_value = float(rank + 1)
-            else:  # Face cards (J, Q, K)
-                point_value = 10.0
-                
-            # Normalize point value from [-2,10] to [0,1]
-            normalized_point_value = (point_value + 2) / 12.0
-                
-            # Set the values in the observation array
-            obs[start_idx] = rank_value
-            obs[start_idx + 1] = wild_flag
-            obs[start_idx + 2] = normalized_point_value
-        
-        # Encode current player's hand
-        for i, card in enumerate(self.player_hands[self.current_player]):
-            start_idx = i * 3
-            # For revealed cards, encode the actual card
+        # Encode current player's hand (first 6 positions)
+        for i, rank in enumerate(self.player_hands[self.current_player]):
+            # For revealed cards, encode the actual rank
             if i in self.revealed_cards[self.current_player]:
-                encode_card(card, start_idx)
+                obs[i] = rank
                 # Set revealed flag
-                obs[36 + i] = 1.0
-            # For hidden cards, leave as zeros (unknown)
+                obs[14 + i] = 1.0
         
-        # Encode opponent's visible cards
+        # Encode opponent's visible cards (next 6 positions)
         opponent = (self.current_player + 1) % self.num_players
-        for i, card in enumerate(self.player_hands[opponent]):
+        for i, rank in enumerate(self.player_hands[opponent]):
             # Only encode revealed cards
             if i in self.revealed_cards[opponent]:
-                start_idx = 18 + (i * 3)  # Start after player's 18 elements
-                encode_card(card, start_idx)
+                obs[6 + i] = rank
                 # Set revealed flag
-                obs[42 + i] = 1.0
+                obs[20 + i] = 1.0
         
-        # Encode discard pile top card
+        # Encode discard pile top card (position 12)
         if self.discard_pile:
-            encode_card(self.discard_pile[-1], 48)
+            obs[12] = self.discard_pile[-1]
         
-        # Encode drawn card
+        # Encode drawn card (position 13)
         if self.drawn_card is not None:
-            encode_card(self.drawn_card, 51)
+            obs[13] = self.drawn_card
             
-            # Set drawn from discard flag
+            # Set drawn from discard flag (index 26)
             if self.drawn_from_discard:
-                obs[54] = 1.0
+                obs[26] = 1.0
         
-        # Set final round flag
+        # Set final round flag (index 27)
         if self.final_round:
-            obs[55] = 1.0
+            obs[27] = 1.0
             
         return obs
     
@@ -207,6 +176,41 @@ class GolfGame:
                 valid_actions.append(8)  # Action 8 for discarding
                 
             return valid_actions
+    
+    def _normalize_reward(self, reward: float, is_terminal: bool = False) -> float:
+        """
+        Normalize rewards to a consistent scale.
+        
+        For terminal rewards (end of game):
+        - Win rewards are normalized to [0.5, 1.0]
+        - Loss penalties are normalized to [-1.0, -0.5]
+        
+        For intermediate rewards:
+        - All rewards are normalized to [-0.5, 0.5]
+        
+        Args:
+            reward: The raw reward value
+            is_terminal: Whether this is a terminal reward (end of game)
+            
+        Returns:
+            Normalized reward value
+        """
+        if not self.normalize_rewards:
+            return reward
+            
+        if is_terminal:
+            if reward > 0:  # Win reward
+                # Map positive terminal rewards to [0.5, 1.0]
+                # Typical win reward is 5.0 + margin bonus (up to ~10)
+                return 0.5 + min(0.5, reward / 10.0)
+            else:  # Loss penalty
+                # Map negative terminal rewards to [-1.0, -0.5]
+                # Typical loss penalty is -0.3 * score_diff (up to ~-10)
+                return -0.5 + max(-0.5, reward / 10.0)
+        else:  # Intermediate rewards
+            # Map intermediate rewards to [-0.5, 0.5]
+            # Typical intermediate rewards range from -1.0 to 2.0
+            return np.clip(reward / 4.0, -0.5, 0.5)
     
     def step(self, action: int) -> Tuple[np.ndarray, float, bool, Dict]:
         """
@@ -258,9 +262,11 @@ class GolfGame:
                     self.drawn_card = self.discard_pile.pop()
                     self.drawn_from_discard = True
                 else:
-                    return self._get_observation(), -1, False, {"error": "Discard pile is empty"}
+                    # Normalize invalid action penalty
+                    return self._get_observation(), self._normalize_reward(-1), False, {"error": "Discard pile is empty"}
             else:
-                return self._get_observation(), -1, False, {"error": "Invalid action"}
+                # Normalize invalid action penalty
+                return self._get_observation(), self._normalize_reward(-1), False, {"error": "Invalid action"}
         else:
             # Handle card replacement phase
             if 2 <= action <= 7:  # Replace card
@@ -279,10 +285,12 @@ class GolfGame:
                 
             elif action == 8:  # Discard drawn card (was previously 9)
                 if self.drawn_from_discard:
-                    return self._get_observation(), -1, False, {"error": "Cannot discard a card taken from the discard pile"}
+                    # Normalize invalid action penalty
+                    return self._get_observation(), self._normalize_reward(-1), False, {"error": "Cannot discard a card taken from the discard pile"}
                 self.discard_pile.append(self.drawn_card)
             else:
-                return self._get_observation(), -1, False, {"error": "Invalid action"}
+                # Normalize invalid action penalty
+                return self._get_observation(), self._normalize_reward(-1), False, {"error": "Invalid action"}
                 
             self.drawn_card = None
             
@@ -299,30 +307,26 @@ class GolfGame:
             min_score = min(scores)
             current_player_score = scores[self.current_player]
             
-            # Enhanced terminal rewards
+            # Simplified terminal rewards
             if current_player_score == min_score:
-                # Winning is highly rewarded
-                if len(self.revealed_cards[self.current_player]) == 6:
-                    # Extra reward for winning with all cards revealed
-                    reward = 15.0
-                else:
-                    reward = 10.0
+                # Winning is rewarded with a fixed value
+                reward = 5.0
                 
-                # Additional reward based on margin of victory
+                # Reduced margin-of-victory bonus
                 margin = sum(scores) / len(scores) - current_player_score
-                reward += 0.5 * margin  # Bigger wins are better
+                reward += 0.3 * margin  # Reduced from 0.5 to 0.3
             else:
-                # Negative reward based on how far from winning, but less punishing
+                # Simplified losing penalty based on score difference
                 score_diff = current_player_score - min_score
-                reward = -0.5 * score_diff
-                
-                # Less penalty if the player revealed more cards (encouraging exploration)
-                revealed_ratio = len(self.revealed_cards[self.current_player]) / 6.0
-                reward *= (1.0 - 0.3 * revealed_ratio)
+                reward = -0.3 * score_diff
             
             info["scores"] = scores
+            # Store raw reward in info dict for debugging
+            info["raw_reward"] = reward
+            # Normalize terminal reward
+            reward = self._normalize_reward(reward, is_terminal=True)
         else:
-            # Enhanced intermediate rewards
+            # Simplified intermediate rewards
             reward = 0.0
             
             # If this was a card replacement action (actions 2-7)
@@ -336,68 +340,75 @@ class GolfGame:
                 old_value = self._card_value(old_card)
                 new_value = self._card_value(new_card)
                 
-                # Stronger reward for replacing a high-value card with a lower-value card
+                # Simplified reward for replacing a high-value card with a lower-value card
                 value_improvement = old_value - new_value
-                reward += 0.5 * value_improvement  # Increased from 0.2 to 0.5
+                if value_improvement > 0:
+                    reward += 0.5 * value_improvement
                 
                 # Check if this created a match in the column
                 col = position % 3
                 other_position = (position + 3) % 6  # The other position in the same column
                 other_card = self.player_hands[self.current_player][other_position]
                 
-                # Extra reward for creating a match (same rank)
-                if new_card[1] == other_card[1]:
-                    # Significantly higher reward for creating matches
-                    reward += 2.0  # Increased from 1.0 to 2.0
-                    
-                    # Even more reward if it's a 2 (worth -2 points)
-                    if new_card[1] == 1:  # 2 is rank 1 (0-indexed)
-                        reward += 1.0  # Increased from 0.5 to 1.0
+                # Simplified reward for creating a match (same rank)
+                if new_card == other_card:
+                    # Only reward for matches if both cards are revealed
+                    if position in self.revealed_cards[self.current_player] and other_position in self.revealed_cards[self.current_player]:
+                        # Reduced reward for creating matches
+                        reward += 1.0  # Reduced from 2.0 to 1.0
                 
-                # Reward for revealing cards (encouraging exploration)
+                # Simplified reward for revealing cards
                 if position not in self.revealed_cards[self.current_player]:
-                    # Higher reward for revealing cards
-                    reward += 0.3  # Increased from 0.1 to 0.3
+                    # Reduced reward for revealing cards
+                    reward += 0.1  # Reduced from 0.3 to 0.1
                     
-                    # Extra reward for revealing cards early in the game
-                    if len(self.revealed_cards[self.current_player]) < 3:
-                        reward += 0.2  # Additional reward for early exploration
-                
-                # Reward for strategic play - replacing cards in columns with high total value
-                if other_position in self.revealed_cards[self.current_player]:
-                    # If the other card in column is revealed, reward replacing high-value columns
-                    column_value = self._card_value(new_card) + self._card_value(other_card)
-                    if column_value > 10:  # If column has high value
-                        reward += 0.2  # Reward for targeting high-value columns
+                    # Removed early-game bonus for revealing cards
             
-            # Penalty for discarding a potentially useful card
+            # Simplified penalty for discarding a card
             elif action == 8:
-                card_value = self._card_value(self.discard_pile[-1])
-                if card_value <= 5:  # If it's a low-value card (A, 2, 3, 4, 5)
-                    reward -= 0.2 * (6 - card_value)  # Increased penalty for discarding valuable cards
-                
-                # Additional penalty for discarding a card that could create a match
-                discarded_rank = self.discard_pile[-1][1]
+                # Only penalize discarding an obvious match
+                discarded_rank = self.discard_pile[-1]
                 for i in range(3):  # Check each column
                     # Check if discarded card could match any revealed card
                     top_pos, bottom_pos = i, i + 3
-                    if top_pos in self.revealed_cards[self.current_player]:
-                        if self.player_hands[self.current_player][top_pos][1] == discarded_rank:
-                            reward -= 0.5  # Penalty for discarding a potential match
-                    if bottom_pos in self.revealed_cards[self.current_player]:
-                        if self.player_hands[self.current_player][bottom_pos][1] == discarded_rank:
-                            reward -= 0.5  # Penalty for discarding a potential match
+                    if top_pos in self.revealed_cards[self.current_player] and bottom_pos in self.revealed_cards[self.current_player]:
+                        # Only penalize if both cards in column are revealed (obvious match)
+                        if self.player_hands[self.current_player][top_pos] == discarded_rank or \
+                           self.player_hands[self.current_player][bottom_pos] == discarded_rank:
+                            reward -= 0.5  # Penalty for discarding an obvious match
             
-            # Apply a penalty proportional to the current score
-            # This encourages the agent to keep the score low throughout the game
-            current_score = self._calculate_score(self.current_player)
-            reward -= 0.02 * current_score  # Increased from 0.01 to 0.02
+            # Simplified score-based penalty - only consider revealed cards
+            visible_score = 0
+            hand = self.player_hands[self.current_player]
             
-            # Reward for making progress in revealing cards
-            revealed_count = len(self.revealed_cards[self.current_player])
-            if revealed_count >= 4 and not self.final_round:
-                # Encourage revealing more cards as game progresses
-                reward += 0.1 * revealed_count
+            # Calculate score only using revealed cards
+            for col in range(3):
+                top_pos, bottom_pos = col, col + 3
+                top_revealed = top_pos in self.revealed_cards[self.current_player]
+                bottom_revealed = bottom_pos in self.revealed_cards[self.current_player]
+                
+                # If both cards in column are revealed, check for matches
+                if top_revealed and bottom_revealed:
+                    if hand[top_pos] == hand[bottom_pos]:
+                        # Matching cards cancel out
+                        if hand[top_pos] == 1:  # Special case for 2s
+                            visible_score -= 4
+                        continue
+                    else:
+                        visible_score += self._card_value(hand[top_pos]) + self._card_value(hand[bottom_pos])
+                # If only one card is revealed, add its value
+                elif top_revealed:
+                    visible_score += self._card_value(hand[top_pos])
+                elif bottom_revealed:
+                    visible_score += self._card_value(hand[bottom_pos])
+                
+            # Apply penalty based only on visible score
+            reward -= 0.01 * visible_score
+            
+            # Store raw reward in info dict for debugging
+            info["raw_reward"] = reward
+            # Normalize intermediate reward
+            reward = self._normalize_reward(reward)
         
         return self._get_observation(), reward, self.game_over, info
     
@@ -413,23 +424,21 @@ class GolfGame:
             # Print top row
             for i in range(3):
                 if player == self.current_player or i in revealed:
-                    suit, rank = hand[i]
+                    rank = hand[i]
                     rank_str = "A23456789TJQK"[rank]
-                    suit_str = "♣♦♥♠"[suit]
-                    print(f"{rank_str}{suit_str} ", end="")
+                    print(f"{rank_str} ", end="")
                 else:
-                    print("## ", end="")
+                    print("# ", end="")
             print()
             
             # Print bottom row
             for i in range(3, 6):
                 if player == self.current_player or i in revealed:
-                    suit, rank = hand[i]
+                    rank = hand[i]
                     rank_str = "A23456789TJQK"[rank]
-                    suit_str = "♣♦♥♠"[suit]
-                    print(f"{rank_str}{suit_str} ", end="")
+                    print(f"{rank_str} ", end="")
                 else:
-                    print("## ", end="")
+                    print("# ", end="")
             print()
             
             print(f"Cards revealed: {len(revealed)}/6")
@@ -437,16 +446,14 @@ class GolfGame:
             print()
         
         if self.discard_pile:
-            suit, rank = self.discard_pile[-1]
+            rank = self.discard_pile[-1]
             rank_str = "A23456789TJQK"[rank]
-            suit_str = "♣♦♥♠"[suit]
-            print(f"Discard pile top: {rank_str}{suit_str}")
+            print(f"Discard pile top: {rank_str}")
         
-        if self.drawn_card:
-            suit, rank = self.drawn_card
+        if self.drawn_card is not None:
+            rank = self.drawn_card
             rank_str = "A23456789TJQK"[rank]
-            suit_str = "♣♦♥♠"[suit]
-            print(f"Drawn card: {rank_str}{suit_str}")
+            print(f"Drawn card: {rank_str}")
         
         if self.final_round:
             print("Final round in progress!")

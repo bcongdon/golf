@@ -5,55 +5,54 @@ import torch.optim as optim
 import random
 from collections import deque
 from typing import List, Tuple, Dict
+from replay_buffer import PrioritizedReplayBuffer
 
 class GolfMLP(nn.Module):
     """
-    Enhanced multi-layer perceptron for the Golf card game.
+    Enhanced multi-layer perceptron for the Golf card game with card embeddings.
     
-    Input: Game state representation
+    Input: Game state representation with card indices
     Output: Q-values for each possible action
     """
     
-    def __init__(self, input_size: int = 56, hidden_size: int = 512, output_size: int = 9):
+    def __init__(self, input_size: int = 28, hidden_size: int = 512, output_size: int = 9, 
+                 embedding_dim: int = 8, num_card_ranks: int = 13):
         super(GolfMLP, self).__init__()
         
         # Determine if CUDA is available for optimizations
         self.use_cuda = torch.cuda.is_available()
         
-        # Deeper network with larger hidden size and different activation functions
+        # Card embedding layer (13 possible ranks -> embedding_dim)
+        self.card_embedding = nn.Embedding(num_card_ranks + 1, embedding_dim)  # +1 for unknown/masked cards
+        
+        # Calculate the size after embeddings
+        # 14 card positions (6 player cards + 6 opponent cards + discard + drawn)
+        self.num_card_positions = 14
+        embedded_size = self.num_card_positions * embedding_dim
+        
+        # Add the non-card features (12 binary flags for revealed cards + 2 game state flags)
+        self.non_card_features = 14
+        total_features = embedded_size + self.non_card_features
+        
+        # Network with two hidden layers and no dropout
         self.network = nn.Sequential(
             # Input layer
-            nn.Linear(input_size, hidden_size),
+            nn.Linear(total_features, hidden_size),
             nn.LayerNorm(hidden_size),
             nn.LeakyReLU(0.1),  # LeakyReLU instead of ReLU for better gradient flow
-            nn.Dropout(0.2),
             
             # First hidden layer
             nn.Linear(hidden_size, hidden_size),
             nn.LayerNorm(hidden_size),
             nn.LeakyReLU(0.1),
-            nn.Dropout(0.2),
-            
-            # Second hidden layer (new)
+
+            # Second hidden layer
             nn.Linear(hidden_size, hidden_size),
             nn.LayerNorm(hidden_size),
             nn.LeakyReLU(0.1),
-            nn.Dropout(0.2),
-            
-            # Third hidden layer (new)
-            nn.Linear(hidden_size, hidden_size // 2),
-            nn.LayerNorm(hidden_size // 2),
-            nn.LeakyReLU(0.1),
-            nn.Dropout(0.15),
-            
-            # Fourth hidden layer (new)
-            nn.Linear(hidden_size // 2, hidden_size // 2),
-            nn.LayerNorm(hidden_size // 2),
-            nn.LeakyReLU(0.1),
-            nn.Dropout(0.15),
             
             # Output layer
-            nn.Linear(hidden_size // 2, output_size)
+            nn.Linear(hidden_size, output_size)
         )
         
         # Initialize weights using Kaiming initialization (better for LeakyReLU)
@@ -74,309 +73,23 @@ class GolfMLP(nn.Module):
         # Convert input to channels_last format if using CUDA for better performance
         if self.use_cuda and x.dim() >= 3:
             x = x.to(memory_format=torch.channels_last)
-        return self.network(x)
-
-
-class PrioritizedReplayBuffer:
-    """
-    Optimized Prioritized experience replay buffer with episode marking for winning trajectories.
-    Uses vectorized operations for better performance.
-    """
-    
-    def __init__(self, capacity: int = 10000, alpha: float = 0.6, beta: float = 0.4, beta_increment: float = 0.001):
-        self.capacity = capacity
-        self.buffer = []  # List of experiences
-        self.priorities = np.zeros(capacity, dtype=np.float32)
-        self.position = 0  # Current position in buffer
-        self.size = 0  # Current size of buffer
-        
-        # PER hyperparameters
-        self.alpha = alpha  # How much prioritization to use (0 = uniform, 1 = full prioritization)
-        self.beta = beta  # Importance sampling weight (0 = no correction, 1 = full correction)
-        self.beta_increment = beta_increment  # Increment beta over time to reduce bias
-        self.max_priority = 1.0  # Initial max priority
-        
-        # Episode tracking
-        self.current_episode = []  # Temporarily stores the current episode
-        self.win_multiplier = 2.0  # Priority multiplier for winning episodes
-        
-        # Pre-allocate arrays for better performance
-        self._states = None
-        self._actions = None
-        self._rewards = None
-        self._next_states = None
-        self._dones = None
-        self._initialized = False
-        
-        # Use a more efficient data structure for sampling
-        self._segment_tree_initialized = False
-        self._sum_tree = None
-        self._min_tree = None
-        
-        # Cache for faster sampling
-        self._cached_indices = None
-        self._cached_weights = None
-        self._last_beta = None
-    
-    def _initialize_arrays(self, state_shape):
-        """Initialize arrays based on first experience."""
-        if not self._initialized:
-            # Use float16 for states to reduce memory usage (if using CUDA)
-            if torch.cuda.is_available():
-                self._states = np.zeros((self.capacity,) + state_shape, dtype=np.float16)
-                self._next_states = np.zeros((self.capacity,) + state_shape, dtype=np.float16)
-            else:
-                # For CPU or MPS, use float32
-                self._states = np.zeros((self.capacity,) + state_shape, dtype=np.float32)
-                self._next_states = np.zeros((self.capacity,) + state_shape, dtype=np.float32)
-                
-            self._actions = np.zeros(self.capacity, dtype=np.int32)  # int32 is enough for actions
-            self._rewards = np.zeros(self.capacity, dtype=np.float32)
-            self._dones = np.zeros(self.capacity, dtype=np.bool_)
-            self._initialized = True
             
-            # Initialize segment trees for efficient sampling
-            self._initialize_segment_trees()
-    
-    def _initialize_segment_trees(self):
-        """Initialize segment trees for efficient sampling."""
-        if not self._segment_tree_initialized:
-            # Create sum and min trees for efficient sampling
-            self._sum_tree = np.zeros(2 * self.capacity - 1, dtype=np.float32)
-            self._min_tree = np.zeros(2 * self.capacity - 1, dtype=np.float32)
-            self._segment_tree_initialized = True
-    
-    def _update_segment_trees(self, idx, priority):
-        """Update segment trees with new priority."""
-        if not self._segment_tree_initialized:
-            return
-            
-        # Convert to tree index
-        tree_idx = idx + self.capacity - 1
+        # Extract card indices and non-card features
+        card_indices = x[:, :self.num_card_positions].long()  # First 14 elements are card indices
+        non_card_features = x[:, self.num_card_positions:]    # Remaining elements are binary features
         
-        # Update sum tree
-        change = priority - self._sum_tree[tree_idx]
-        self._sum_tree[tree_idx] = priority
+        # Apply embedding to card indices
+        embedded_cards = self.card_embedding(card_indices)
         
-        # Propagate changes up the tree
-        while tree_idx > 0:
-            tree_idx = (tree_idx - 1) // 2
-            self._sum_tree[tree_idx] = self._sum_tree[2 * tree_idx + 1] + self._sum_tree[2 * tree_idx + 2]
+        # Flatten the embeddings
+        batch_size = embedded_cards.size(0)
+        embedded_cards = embedded_cards.view(batch_size, -1)
         
-        # Update min tree
-        tree_idx = idx + self.capacity - 1
-        self._min_tree[tree_idx] = priority
+        # Concatenate with non-card features
+        combined_features = torch.cat([embedded_cards, non_card_features], dim=1)
         
-        # Propagate changes up the tree
-        while tree_idx > 0:
-            tree_idx = (tree_idx - 1) // 2
-            self._min_tree[tree_idx] = min(self._min_tree[2 * tree_idx + 1], self._min_tree[2 * tree_idx + 2])
-    
-    def _get_priority(self, idx):
-        """Get priority from segment tree."""
-        if not self._segment_tree_initialized:
-            return self.priorities[idx]
-            
-        return self._sum_tree[idx + self.capacity - 1]
-    
-    def _sum(self):
-        """Get sum of all priorities."""
-        if not self._segment_tree_initialized:
-            return np.sum(self.priorities[:self.size])
-            
-        return self._sum_tree[0]
-    
-    def _min(self):
-        """Get minimum priority."""
-        if not self._segment_tree_initialized:
-            return np.min(self.priorities[:self.size]) if self.size > 0 else 1.0
-            
-        return self._min_tree[0]
-    
-    def add(self, state, action, reward, next_state, done, win=False):
-        """Add a new experience to the buffer."""
-        # Store experience in the current episode
-        self.current_episode.append((state, action, reward, next_state, done))
-        
-        # If episode is done, process the entire episode
-        if done:
-            # Calculate priority multiplier based on win status
-            priority_multiplier = self.win_multiplier if win else 1.0
-            
-            # Add all transitions from the episode to the buffer with appropriate priority
-            for exp in self.current_episode:
-                state, action, reward, next_state, done = exp
-                
-                # Initialize arrays if needed
-                if not self._initialized and state is not None:
-                    self._initialize_arrays(np.array(state).shape)
-                
-                # Create an experience with max priority
-                priority = self.max_priority * priority_multiplier
-                
-                # Add to buffer
-                if self.size < self.capacity:
-                    if self._initialized:
-                        # Convert to float16 if using CUDA to save memory
-                        if torch.cuda.is_available():
-                            self._states[self.size] = state.astype(np.float16)
-                            self._next_states[self.size] = next_state.astype(np.float16)
-                        else:
-                            # For CPU or MPS, use float32
-                            self._states[self.size] = state
-                            self._next_states[self.size] = next_state
-                            
-                        self._actions[self.size] = action
-                        self._rewards[self.size] = reward
-                        self._dones[self.size] = done
-                    else:
-                        self.buffer.append(exp)
-                        
-                    self.priorities[self.size] = priority
-                    self._update_segment_trees(self.size, priority ** self.alpha)
-                    self.size += 1
-                else:
-                    if self._initialized:
-                        # Convert to float16 if using CUDA to save memory
-                        if torch.cuda.is_available():
-                            self._states[self.position] = state.astype(np.float16)
-                            self._next_states[self.position] = next_state.astype(np.float16)
-                        else:
-                            # For CPU or MPS, use float32
-                            self._states[self.position] = state
-                            self._next_states[self.position] = next_state
-                            
-                        self._actions[self.position] = action
-                        self._rewards[self.position] = reward
-                        self._dones[self.position] = done
-                    else:
-                        self.buffer[self.position] = exp
-                        
-                    self.priorities[self.position] = priority
-                    self._update_segment_trees(self.position, priority ** self.alpha)
-                    self.position = (self.position + 1) % self.capacity
-            
-            # Clear the current episode
-            self.current_episode = []
-    
-    def _sample_proportional(self, batch_size):
-        """Sample indices based on proportional prioritization."""
-        if not self._segment_tree_initialized:
-            # Fallback to numpy sampling
-            priorities = self.priorities[:self.size]
-            probs = priorities ** self.alpha
-            probs /= np.sum(probs)
-            return np.random.choice(self.size, batch_size, p=probs, replace=False)
-        
-        indices = np.zeros(batch_size, dtype=np.int32)
-        
-        # Get sum of priorities
-        total_priority = self._sum()
-        
-        # Divide range into batch_size segments
-        segment_size = total_priority / batch_size
-        
-        for i in range(batch_size):
-            # Sample uniformly from segment
-            mass = np.random.uniform(segment_size * i, segment_size * (i + 1))
-            
-            # Search for index in sum tree
-            idx = 0
-            while idx < self.capacity - 1:
-                left = 2 * idx + 1
-                if mass <= self._sum_tree[left]:
-                    idx = left
-                else:
-                    mass -= self._sum_tree[left]
-                    idx = 2 * idx + 2
-            
-            # Convert tree index to buffer index
-            indices[i] = idx - (self.capacity - 1)
-        
-        return indices
-    
-    def sample(self, batch_size: int) -> Tuple[List, List[int], np.ndarray]:
-        """Sample a batch of experiences based on priorities using vectorized operations."""
-        if self.size == 0:
-            return [], [], np.array([])
-        
-        # Update beta for importance sampling
-        self.beta = min(1.0, self.beta + self.beta_increment)
-        
-        # Check if we can reuse cached indices and weights
-        if self._cached_indices is not None and len(self._cached_indices) == batch_size and self._last_beta == self.beta:
-            indices = self._cached_indices
-            weights = self._cached_weights
-        else:
-            # Sample indices based on priorities
-            indices = self._sample_proportional(min(batch_size, self.size))
-            
-            # Calculate importance sampling weights
-            weights = self._calculate_weights(indices)
-            
-            # Cache for next time
-            self._cached_indices = indices
-            self._cached_weights = weights
-            self._last_beta = self.beta
-        
-        # Get sampled experiences
-        if self._initialized:
-            # Use pre-allocated arrays for faster access
-            states = self._states[indices]
-            actions = self._actions[indices]
-            rewards = self._rewards[indices]
-            next_states = self._next_states[indices]
-            dones = self._dones[indices]
-            
-            # Convert float16 back to float32 if needed
-            if torch.cuda.is_available() and states.dtype == np.float16:
-                states = states.astype(np.float32)
-                next_states = next_states.astype(np.float32)
-                
-            experiences = list(zip(states, actions, rewards, next_states, dones))
-        else:
-            experiences = [self.buffer[idx] for idx in indices]
-        
-        return experiences, indices, weights
-    
-    def _calculate_weights(self, indices):
-        """Calculate importance sampling weights."""
-        # Get priorities for the sampled indices
-        if self._segment_tree_initialized:
-            priorities = np.array([self._get_priority(idx) for idx in indices])
-        else:
-            priorities = self.priorities[indices]
-        
-        # Convert priorities to probabilities
-        probs = priorities / self._sum()
-        
-        # Calculate importance sampling weights
-        weights = (self.size * probs) ** (-self.beta)
-        
-        # Normalize weights
-        weights /= weights.max()
-        
-        return weights
-    
-    def update_priorities(self, indices: List[int], td_errors: np.ndarray):
-        """Update priorities based on TD errors using vectorized operations."""
-        # Add small epsilon to ensure non-zero priority (vectorized)
-        new_priorities = np.abs(td_errors) + 1e-5
-        
-        # Update priorities and segment trees
-        for idx, priority in zip(indices, new_priorities):
-            self.priorities[idx] = priority
-            self._update_segment_trees(idx, priority ** self.alpha)
-        
-        # Update max priority
-        self.max_priority = max(self.max_priority, new_priorities.max())
-        
-        # Invalidate cache
-        self._cached_indices = None
-        self._cached_weights = None
-    
-    def __len__(self) -> int:
-        return self.size
+        # Pass through the network
+        return self.network(combined_features)
 
 
 class DQNAgent:
@@ -386,9 +99,11 @@ class DQNAgent:
     
     def __init__(
         self,
-        state_size: int = 56,  # Size of the observation space (card representation)
+        state_size: int = 28,  # New size: 14 card indices + 14 binary features
         action_size: int = 9,  # Number of possible actions in the game
         hidden_size: int = 512,  # Size of hidden layers in neural network
+        embedding_dim: int = 8,  # Dimension of card embeddings
+        num_card_ranks: int = 13,  # Number of possible card ranks
         learning_rate: float = 0.0001,  # Learning rate for optimizer
         gamma: float = 0.99,  # Discount factor for future rewards
         epsilon_start: float = 1.0,  # Initial exploration rate
@@ -405,6 +120,8 @@ class DQNAgent:
         self.state_size = state_size
         self.action_size = action_size
         self.hidden_size = hidden_size
+        self.embedding_dim = embedding_dim
+        self.num_card_ranks = num_card_ranks
         self.learning_rate = learning_rate
         self.gamma = gamma  # Discount factor
         
@@ -445,8 +162,22 @@ class DQNAgent:
         else:
             self.device = torch.device("cpu")
             
-        self.q_network = GolfMLP(state_size, hidden_size, action_size).to(self.device)
-        self.target_network = GolfMLP(state_size, hidden_size, action_size).to(self.device)
+        self.q_network = GolfMLP(
+            input_size=state_size, 
+            hidden_size=hidden_size, 
+            output_size=action_size,
+            embedding_dim=embedding_dim,
+            num_card_ranks=num_card_ranks
+        ).to(self.device)
+        
+        self.target_network = GolfMLP(
+            input_size=state_size, 
+            hidden_size=hidden_size, 
+            output_size=action_size,
+            embedding_dim=embedding_dim,
+            num_card_ranks=num_card_ranks
+        ).to(self.device)
+        
         self.target_network.load_state_dict(self.q_network.state_dict())
         self.target_network.eval()  # Target network is used for prediction only
         
@@ -518,131 +249,76 @@ class DQNAgent:
                 # Use common random policy for exploration
                 return self.random_action(valid_actions)
             else:
-                # Exploitation with softmax exploration
-                # Apply temperature to Q-values
-                temperature = max(0.5, 1.0 - self.epsilon)  # Lower temperature as epsilon decreases
-                
-                # Numerically stable softmax implementation
-                q_values_array = np.array(list(valid_q.values())) / temperature
-                # Subtract max value for numerical stability
-                q_values_array = q_values_array - np.max(q_values_array)
-                # Apply exp with clipping to prevent overflow
-                exp_q = np.exp(np.clip(q_values_array, -20, 20))
-                # Normalize to get probabilities
-                sum_exp_q = np.sum(exp_q)
-                if sum_exp_q > 0:  # Ensure we don't divide by zero
-                    probs = exp_q / sum_exp_q
-                else:
-                    # Fallback to uniform distribution if all values are extremely negative
-                    probs = np.ones_like(exp_q) / len(exp_q)
-                
-                # Sample action based on softmax probabilities
-                actions = list(valid_q.keys())
-                if random.random() < 0.8:  # 80% chance to use softmax
-                    return np.random.choice(actions, p=probs)
-                else:
-                    # 20% chance to pick the best action
-                    return max(valid_q, key=valid_q.get)
+                # Exploitation - simply choose the action with highest Q-value
+                return max(valid_q, key=valid_q.get)
         else:
             # During evaluation, always pick the best action
             return max(valid_q, key=valid_q.get)
     
     def remember(self, state, action, reward, next_state, done):
-        """Add experience to replay buffer with win detection."""
-        # Track episode rewards to detect winning episodes
+        """Add experience to replay buffer."""
+        # Track episode rewards
         self.current_episode_rewards += reward
         
-        # Add to buffer (win status will be determined at end of episode)
-        is_win = False
+        # Create experience tuple
+        experience = (state, action, reward, next_state, done)
+        
+        # Add to buffer
+        self.memory.add(experience)
+        
+        # Reset episode rewards if done
         if done:
-            # If final reward is positive, consider it a win
-            is_win = self.current_episode_rewards > 0
-            self.current_episode_rewards = 0  # Reset for next episode
-            
-        self.memory.add(state, action, reward, next_state, done, win=is_win)
+            self.current_episode_rewards = 0
     
     def learn(self):
         """Update Q-network from experiences in replay buffer with Double DQN and PER."""
         if len(self.memory) < self.batch_size:
-            return
+            return None
         
         # Ensure network is in training mode
         self.q_network.train()
         
-        # Sample batch from prioritized replay buffer
-        batch, indices, weights = self.memory.sample(self.batch_size)
-        
-        if not batch:  # Empty batch check
-            return None
-        
-        # Convert to tensors - optimize for pre-allocated arrays
-        if hasattr(self.memory, '_initialized') and self.memory._initialized:
-            # Data is already in numpy arrays, just convert to tensors
+        try:
+            # Sample batch from prioritized replay buffer
+            batch, indices, weights = self.memory.sample(self.batch_size)
+            
+            # Check if batch is empty
+            if not batch or len(batch) == 0:
+                print("Warning: Empty batch returned from replay buffer")
+                return None
+            
+            # Convert to tensors
             states, actions, rewards, next_states, dones = zip(*batch)
             
-            # Handle device-specific memory optimizations
-            if self.device.type == 'cuda':
-                # Pin memory for faster CPU->GPU transfer (CUDA only)
-                states_tensor = torch.from_numpy(np.array(states, dtype=np.float32)).pin_memory().to(self.device, non_blocking=True)
-                next_states_tensor = torch.from_numpy(np.array(next_states, dtype=np.float32)).pin_memory().to(self.device, non_blocking=True)
-            else:
-                # For CPU or MPS, don't use pin_memory
-                states_tensor = torch.from_numpy(np.array(states, dtype=np.float32)).to(self.device)
-                next_states_tensor = torch.from_numpy(np.array(next_states, dtype=np.float32)).to(self.device)
-            
-            # Smaller tensors can be transferred directly
-            actions_tensor = torch.tensor(actions, dtype=torch.long, device=self.device)
-            rewards_tensor = torch.tensor(rewards, dtype=torch.float32, device=self.device)
-            dones_tensor = torch.tensor(dones, dtype=torch.float32, device=self.device)
-        else:
-            # Need to convert from list of tuples
-            states, actions, rewards, next_states, dones = zip(*batch)
-            
-            # Pre-allocate numpy arrays for faster conversion
+            # Convert to numpy arrays
             states_np = np.array(states, dtype=np.float32)
             next_states_np = np.array(next_states, dtype=np.float32)
             
-            # Handle device-specific memory optimizations
-            if self.device.type == 'cuda':
-                # Pin memory for faster CPU->GPU transfer (CUDA only)
-                states_tensor = torch.from_numpy(states_np).pin_memory().to(self.device, non_blocking=True)
-                next_states_tensor = torch.from_numpy(next_states_np).pin_memory().to(self.device, non_blocking=True)
-            else:
-                # For CPU or MPS, don't use pin_memory
-                states_tensor = torch.from_numpy(states_np).to(self.device)
-                next_states_tensor = torch.from_numpy(next_states_np).to(self.device)
-            
-            # Smaller tensors can be transferred directly
+            # Convert to tensors
+            states_tensor = torch.from_numpy(states_np).to(self.device)
+            next_states_tensor = torch.from_numpy(next_states_np).to(self.device)
             actions_tensor = torch.tensor(actions, dtype=torch.long, device=self.device)
             rewards_tensor = torch.tensor(rewards, dtype=torch.float32, device=self.device)
             dones_tensor = torch.tensor(dones, dtype=torch.float32, device=self.device)
-        
-        # Convert weights to tensor
-        weights_tensor = torch.tensor(weights, dtype=torch.float32, device=self.device)
+            weights_tensor = torch.tensor(weights, dtype=torch.float32, device=self.device)
+        except (TypeError, ValueError, IndexError) as e:
+            print(f"Error processing batch: {e}")
+            return None
         
         # Compute current Q values and target Q values using mixed precision when available
         if self.use_amp:
             with torch.cuda.amp.autocast():
-                # Compute Q-values for both current and next states in a single forward pass
-                # This reduces kernel launch overhead
-                combined_states = torch.cat([states_tensor, next_states_tensor], dim=0)
-                combined_q_values = self.q_network(combined_states)
-                
-                # Split the results
-                batch_size = states_tensor.shape[0]
-                current_q_all = combined_q_values[:batch_size]
-                next_q_all = combined_q_values[batch_size:]
-                
-                # Gather current Q values for the actions taken
+                # Compute Q-values for current states
+                current_q_all = self.q_network(states_tensor)
                 current_q = current_q_all.gather(1, actions_tensor.unsqueeze(1)).squeeze(1)
                 
                 # Compute target Q values using Double DQN
                 with torch.no_grad():
-                    # Get actions from current network (already computed above)
+                    # Get actions from current network
+                    next_q_all = self.q_network(next_states_tensor)
                     next_actions = next_q_all.argmax(1, keepdim=True)
                     
                     # Get Q-values from target network for those actions
-                    # Use torch.no_grad() to avoid tracking gradients
                     target_q_all = self.target_network(next_states_tensor)
                     next_q = target_q_all.gather(1, next_actions).squeeze(1)
                     
@@ -670,21 +346,14 @@ class DQNAgent:
                 td_errors = torch.abs(td_errors_tensor).detach().cpu().numpy()
         else:
             # Standard precision training
-            # Compute Q-values for both current and next states in a single forward pass
-            combined_states = torch.cat([states_tensor, next_states_tensor], dim=0)
-            combined_q_values = self.q_network(combined_states)
-            
-            # Split the results
-            batch_size = states_tensor.shape[0]
-            current_q_all = combined_q_values[:batch_size]
-            next_q_all = combined_q_values[batch_size:]
-            
-            # Gather current Q values for the actions taken
+            # Compute Q-values for current states
+            current_q_all = self.q_network(states_tensor)
             current_q = current_q_all.gather(1, actions_tensor.unsqueeze(1)).squeeze(1)
             
             # Compute target Q values using Double DQN
             with torch.no_grad():
-                # Get actions from current network (already computed above)
+                # Get actions from current network
+                next_q_all = self.q_network(next_states_tensor)
                 next_actions = next_q_all.argmax(1, keepdim=True)
                 
                 # Get Q-values from target network for those actions
@@ -739,6 +408,9 @@ class DQNAgent:
             'per_alpha': self.memory.alpha,
             'per_beta': self.memory.beta,
             'per_max_priority': self.memory.max_priority,
+            # Save embedding parameters
+            'embedding_dim': self.embedding_dim,
+            'num_card_ranks': self.num_card_ranks,
             # Save AMP scaler if using mixed precision
             'amp_scaler': self.scaler.state_dict() if self.use_amp else None
         }, path)
@@ -746,6 +418,35 @@ class DQNAgent:
     def load(self, path: str):
         """Load model weights and PER state."""
         checkpoint = torch.load(path, map_location=self.device)
+        
+        # Check if the saved model uses embeddings
+        if 'embedding_dim' in checkpoint and 'num_card_ranks' in checkpoint:
+            # If embedding parameters differ, recreate the networks
+            if checkpoint['embedding_dim'] != self.embedding_dim or checkpoint['num_card_ranks'] != self.num_card_ranks:
+                self.embedding_dim = checkpoint['embedding_dim']
+                self.num_card_ranks = checkpoint['num_card_ranks']
+                
+                # Recreate networks with the loaded embedding parameters
+                self.q_network = GolfMLP(
+                    input_size=self.state_size,
+                    hidden_size=self.hidden_size,
+                    output_size=self.action_size,
+                    embedding_dim=self.embedding_dim,
+                    num_card_ranks=self.num_card_ranks
+                ).to(self.device)
+                
+                self.target_network = GolfMLP(
+                    input_size=self.state_size,
+                    hidden_size=self.hidden_size,
+                    output_size=self.action_size,
+                    embedding_dim=self.embedding_dim,
+                    num_card_ranks=self.num_card_ranks
+                ).to(self.device)
+                
+                # Recreate optimizer
+                self.optimizer = optim.Adam(self.q_network.parameters(), lr=self.learning_rate)
+        
+        # Load network weights
         self.q_network.load_state_dict(checkpoint['q_network'])
         self.target_network.load_state_dict(checkpoint['target_network'])
         self.optimizer.load_state_dict(checkpoint['optimizer'])

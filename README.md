@@ -108,3 +108,58 @@ python multi_agent_play.py --agents deepseek gpt --llm-models deepseek-chat gpt-
 The project uses a Multi-Layer Perceptron (MLP) trained with reinforcement learning. The agent learns through self-play and experience replay to develop optimal strategies for the Golf card game.
 
 For LLM agents, the game state is converted to a text representation and sent to the LLM with instructions on how to play. The LLM's response is parsed to extract the chosen action.
+
+# Prioritized Experience Replay (PER) Implementation
+
+This repository contains a simplified implementation of Prioritized Experience Replay (PER) for reinforcement learning, as described in the paper [Prioritized Experience Replay](https://arxiv.org/abs/1511.05952) by Schaul et al.
+
+## Overview
+
+Prioritized Experience Replay is a technique that improves the efficiency of experience replay in Deep Q-Networks (DQN) by prioritizing experiences based on their TD-error. This allows the agent to learn more effectively from experiences that are surprising or informative.
+
+## Implementation Details
+
+The implementation consists of two main components:
+
+1. **SumTree**: A binary tree data structure that allows efficient sampling based on priorities. It provides O(log n) operations for updating priorities and sampling.
+
+2. **PrioritizedReplayBuffer**: The main buffer class that uses the SumTree to store and sample experiences based on their priorities.
+
+## Key Features
+
+- **Efficient Sampling**: Uses a sum tree data structure for O(log n) sampling operations.
+- **Importance Sampling**: Corrects the bias introduced by prioritized sampling using importance sampling weights.
+- **Annealing Beta**: Gradually increases the importance sampling correction over time.
+- **Stable Priorities**: Ensures non-zero priorities to maintain exploration.
+
+## Usage
+
+```python
+from replay_buffer import PrioritizedReplayBuffer
+
+# Create a buffer with capacity 10000
+buffer = PrioritizedReplayBuffer(capacity=10000, alpha=0.6, beta=0.4, beta_increment=0.001)
+
+# Add experiences to the buffer
+buffer.add((state, action, reward, next_state, done))
+
+# Sample a batch of experiences
+experiences, indices, weights = buffer.sample(batch_size=32)
+
+# Update priorities based on TD errors
+td_errors = compute_td_errors(experiences)  # Your TD error computation
+buffer.update_priorities(indices, td_errors)
+```
+
+## Testing
+
+The implementation includes comprehensive tests to verify correctness:
+
+```bash
+python test_replay_buffer.py
+```
+
+## References
+
+- [Prioritized Experience Replay](https://arxiv.org/abs/1511.05952) by Schaul et al.
+- [Human-level control through deep reinforcement learning](https://www.nature.com/articles/nature14236) by Mnih et al.

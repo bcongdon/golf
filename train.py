@@ -42,16 +42,17 @@ def setup_logging(log_level):
 
 def parse_args():
     parser = argparse.ArgumentParser(description='Train a DQN agent to play Golf')
-    parser.add_argument('--episodes', type=int, default=25000, help='Number of episodes to train')
-    parser.add_argument('--batch-size', type=int, default=256, help='Batch size for training')
+    parser.add_argument('--episodes', type=int, default=300000, help='Number of episodes to train')
+    parser.add_argument('--batch-size', type=int, default=128, help='Batch size for training')
     parser.add_argument('--hidden-size', type=int, default=512, help='Hidden size of the neural network')
-    parser.add_argument('--lr', type=float, default=1e-4, help='Learning rate')
-    parser.add_argument('--gamma', type=float, default=0.95, help='Discount factor')
+    parser.add_argument('--embedding-dim', type=int, default=8, help='Dimension of card embeddings')
+    parser.add_argument('--lr', type=float, default=5e-5, help='Learning rate')
+    parser.add_argument('--gamma', type=float, default=0.975, help='Discount factor')
     parser.add_argument('--epsilon-start', type=float, default=1.0, help='Starting epsilon for exploration')
     parser.add_argument('--epsilon-end', type=float, default=0.05, help='Minimum epsilon for exploration')
-    parser.add_argument('--epsilon-decay-episodes', type=int, default=20000, help='Number of episodes to decay epsilon from start to end')
-    parser.add_argument('--epsilon-warmup', type=int, default=5000, help='Number of episodes to keep epsilon at start value')
-    parser.add_argument('--target-update', type=int, default=500, help='Target network update frequency')
+    parser.add_argument('--epsilon-decay-episodes', type=int, default=150000, help='Number of episodes to decay epsilon from start to end')
+    parser.add_argument('--epsilon-warmup', type=int, default=100000, help='Number of episodes to keep epsilon at start value')
+    parser.add_argument('--target-update', type=int, default=1000, help='Target network update frequency')
     parser.add_argument('--eval-interval', type=int, default=500, help='Evaluation interval')
     parser.add_argument('--save-dir', type=str, default='models', help='Directory to save models')
     parser.add_argument('--logs-dir', type=str, default='logs', help='Directory to save logs and charts')
@@ -228,7 +229,7 @@ def train(args, logger, logs_dir):
     
     # Initialize environment and agent
     env = GolfGame(num_players=2)  # Two players for self-play: agent and opponent
-    state_size = 56  # Size of the observation space (updated for new 3-element card representation)
+    state_size = 28  # New size: 14 card indices + 14 binary features
     action_size = 9   # Number of possible actions (removed 'knock' action)
     logger.info(f"Environment initialized with state_size={state_size}, action_size={action_size}")
     
@@ -237,6 +238,8 @@ def train(args, logger, logs_dir):
         state_size=state_size,
         action_size=action_size,
         hidden_size=args.hidden_size,
+        embedding_dim=args.embedding_dim,
+        num_card_ranks=13,  # Number of possible card ranks (A-K)
         learning_rate=args.lr,
         gamma=args.gamma,
         epsilon_start=args.epsilon_start,
@@ -246,9 +249,9 @@ def train(args, logger, logs_dir):
         batch_size=args.batch_size,
         target_update=args.target_update,
         # PER parameters
-        per_alpha=0.6,       # How much prioritization to use (0 = none, 1 = full)
+        per_alpha=0.4,       # How much prioritization to use (0 = none, 1 = full)
         per_beta=0.4,        # Start value for importance sampling (0 = no correction, 1 = full)
-        per_beta_increment=0.0001  # Beta increment per learning step
+        per_beta_increment=0.000001  # Beta increment per learning step
     )
     
     # Apply optimization settings
@@ -298,27 +301,23 @@ def train(args, logger, logs_dir):
     rewards = []
     losses = []
     episode_steps = []
+    epsilon_history = []
+    q_value_avg = []
+    q_value_min = []
+    q_value_max = []
+    
+    # Evaluation metrics
     eval_rewards = []
     eval_win_rates = []
     eval_loss_rates = []
     eval_max_turns_rates = []
     eval_avg_scores = []
     eval_score_diffs = []
-    
-    # New metrics for epsilon and Q-values
-    epsilon_history = []
-    q_value_avg = []
-    q_value_min = []
-    q_value_max = []
-    
-    # Learning rate history
-    lr_history = []
-    lr_history_episodes = []
+    eval_draw_rates = []
     
     # Stability tracking
     high_loss_count = 0
     consecutive_high_losses = 0
-    learning_rate_adjustments = 0
     
     # Best model tracking
     best_eval_reward = float('-inf')
@@ -327,16 +326,33 @@ def train(args, logger, logs_dir):
     win_count = 0
     max_turns_reached_count = 0
     
+    # EMA calculation function
+    def calculate_ema(data, alpha=0.1):
+        """Calculate Exponential Moving Average with the given alpha."""
+        ema = np.zeros_like(data, dtype=float)
+        if len(data) > 0:
+            ema[0] = data[0]
+            for i in range(1, len(data)):
+                ema[i] = alpha * data[i] + (1 - alpha) * ema[i-1]
+        return ema
+    
     # Function to save charts
     def save_charts(episode):
         plt.figure(figsize=(15, 20))  # Increased height for more plots
         
         # Row 1: Basic training metrics
         plt.subplot(4, 3, 1)
-        plt.plot(rewards)
+        plt.plot(rewards, alpha=0.5, label='Episode Rewards')
+        
+        # Calculate and plot EMA of rewards
+        if len(rewards) > 0:
+            rewards_ema = calculate_ema(rewards, alpha=0.1)
+            plt.plot(rewards_ema, color='red', linewidth=2, label='EMA (α=0.1)')
+            
         plt.title('Episode Rewards')
         plt.xlabel('Episode')
         plt.ylabel('Reward')
+        plt.legend()
         
         plt.subplot(4, 3, 2)
         plt.plot(losses)
@@ -411,11 +427,15 @@ def train(args, logger, logs_dir):
             plt.legend()
         
         plt.subplot(4, 3, 11)
-        # Plot agent's current learning rate
-        plt.plot(lr_history_episodes, lr_history)
-        plt.title('Learning Rate Adjustments')
-        plt.xlabel('Episode')
-        plt.ylabel('Learning Rate')
+        # Plot EMA of training loss
+        if len(losses) > 0:
+            loss_ema = calculate_ema(losses, alpha=0.1)
+            plt.plot(losses, alpha=0.3, label='Loss')
+            plt.plot(loss_ema, color='blue', linewidth=2, label='EMA (α=0.1)')
+            plt.title('Training Loss with EMA')
+            plt.xlabel('Episode')
+            plt.ylabel('Loss')
+            plt.legend()
         
         plt.tight_layout()
         
@@ -538,17 +558,52 @@ def train(args, logger, logs_dir):
     
     # Function to sample Q-values for monitoring
     def sample_q_values(agent, env, num_samples=10):
-        """Sample Q-values from random states to monitor network behavior."""
+        """Sample Q-values from random hands to monitor network behavior."""
         q_values = []
         
-        # Reset environment to get a valid initial state
-        state = env.reset()
+        # Create a temporary environment for sampling
+        temp_env = GolfGame(num_players=2)
         
-        # Collect Q-values from multiple states
         for _ in range(num_samples):
-            # Get valid actions for this state
-            valid_actions = env._get_valid_actions()
+            # Reset to get a fresh environment
+            state = temp_env.reset()
             
+            # Randomly reveal some cards to create diverse states
+            # This simulates different stages of the game
+            num_revealed = random.randint(1, 5)  # Reveal between 1 and 5 cards
+            
+            # Randomly reveal cards for the current player
+            revealed_indices = random.sample(range(6), num_revealed)
+            for idx in revealed_indices:
+                temp_env.revealed_cards[temp_env.current_player].add(idx)
+            
+            # Randomly reveal some opponent cards
+            opponent = (temp_env.current_player + 1) % temp_env.num_players
+            opponent_revealed = random.randint(0, 4)  # Reveal between 0 and 4 opponent cards
+            if opponent_revealed > 0:
+                opponent_indices = random.sample(range(6), opponent_revealed)
+                for idx in opponent_indices:
+                    temp_env.revealed_cards[opponent].add(idx)
+            
+            # Randomly set drawn card (50% chance)
+            if random.random() < 0.5:
+                if temp_env.deck:
+                    temp_env.drawn_card = temp_env.deck.pop()
+                    temp_env.drawn_from_discard = False
+            
+            # Randomly set discard pile (75% chance)
+            if random.random() < 0.75 and temp_env.deck:
+                temp_env.discard_pile = [temp_env.deck.pop()]
+            
+            # Get the observation after modifications
+            state = temp_env._get_observation()
+            
+            # Get valid actions for this state
+            valid_actions = temp_env._get_valid_actions()
+            
+            if not valid_actions:  # Skip if no valid actions
+                continue
+                
             # Get Q-values for all actions
             state_tensor = torch.FloatTensor(state).unsqueeze(0).to(agent.device)
             with torch.no_grad():
@@ -559,14 +614,6 @@ def train(args, logger, logs_dir):
             
             if valid_q:  # Only append if we have valid actions
                 q_values.extend(valid_q)
-            
-            # Take a random action to get to a new state
-            action = random.choice(valid_actions)
-            state, _, done, _ = env.step(action)
-            
-            # If episode ended, reset
-            if done:
-                state = env.reset()
         
         if not q_values:  # Safety check
             return 0, 0, 0
@@ -610,48 +657,31 @@ def train(args, logger, logs_dir):
                         s, a, r, ns, d = exp
                         agent.remember(s, a, r, ns, d)
                     
-                    # Learn multiple times if we have enough data
-                    # This improves sample efficiency without frequent buffer sampling
-                    num_learn_steps = 1
+                    # Learn if we have enough data
                     if len(agent.memory) >= effective_batch_size:
-                        # If we have a lot of data, do multiple learning steps
-                        if agent.device.type == 'cuda':
-                            num_learn_steps = 2  # More learning steps on GPU for better utilization
+                        loss = agent.learn()
                         
-                        total_loss = 0
-                        for _ in range(num_learn_steps):
-                            loss = agent.learn()
-                            if loss is not None:
-                                total_loss += loss
-                        
-                        # Average loss over learning steps
-                        if num_learn_steps > 0:
-                            avg_loss = total_loss / num_learn_steps
-                            
+                        if loss is not None:
                             # Check for potential learning instability
-                            if avg_loss > 100:
+                            if loss > 100:
                                 high_loss_count += 1
                                 consecutive_high_losses += 1
-                                logger.warning(f"High loss detected: {avg_loss:.2f} at step {steps}, episode {episode+1}")
+                                logger.warning(f"High loss detected: {loss:.2f} at step {steps}, episode {episode+1}")
                                 
-                                # Automatic learning rate adjustment
+                                # Automatic learning rate adjustment code removed
                                 if consecutive_high_losses >= 5:
-                                    # Reduce learning rate
-                                    for param_group in agent.optimizer.param_groups:
-                                        param_group['lr'] *= 0.5
-                                        new_lr = param_group['lr']
-                                    
-                                    # Record learning rate change
-                                    learning_rate_adjustments += 1
-                                    lr_history.append(new_lr)
-                                    lr_history_episodes.append(episode)
-                                    
-                                    logger.warning(f"Adjusted learning rate to {new_lr:.6f} due to instability")
+                                    # Reset consecutive high losses counter
                                     consecutive_high_losses = 0
+                                    logger.warning(f"High loss streak ended")
+                                    
+                                    # Save a checkpoint for debugging
+                                    checkpoint_path = os.path.join(args.save_dir, f'checkpoint_high_loss_ep{episode+1}.pt')
+                                    agent.save(checkpoint_path)
+                                    logger.info(f"Saved checkpoint due to high losses: {checkpoint_path}")
                             else:
                                 consecutive_high_losses = 0  # Reset counter when loss is normal
                                 
-                            episode_losses.append(avg_loss)
+                            episode_losses.append(loss)
                     
                     # Clear batch after learning
                     experiences_batch = []
@@ -727,17 +757,6 @@ def train(args, logger, logs_dir):
             q_value_max.append(max_q)
             logger.debug(f"Q-value stats - Avg: {avg_q:.4f}, Min: {min_q:.4f}, Max: {max_q:.4f}")
         
-        # Implement learning rate annealing
-        # Gradually reduce learning rate as training progresses
-        if (episode + 1) % 1000 == 0 and episode > 0:
-            # Reduce learning rate by 5% every 1000 episodes
-            for param_group in agent.optimizer.param_groups:
-                param_group['lr'] = max(1e-5, param_group['lr'] * 0.95)
-                current_lr = param_group['lr']
-                logger.info(f"Learning rate annealed to {current_lr:.6f}")
-                lr_history.append(current_lr)
-                lr_history_episodes.append(episode)
-        
         # Log progress periodically
         if (episode + 1) % 100 == 0:
             win_rate = win_count / (episode + 1)
@@ -748,16 +767,8 @@ def train(args, logger, logs_dir):
             logger.info(f"Episode {episode+1}: Reward={episode_reward:.2f}{loss_info}")
             
             logger.info(f"Epsilon={agent.epsilon:.4f} (Current)")
-            # Show learning stability metrics
-            stability_info = ""
-            if high_loss_count > 0:
-                stability_info = f", LR Adjustments={learning_rate_adjustments}"
-                current_lr = agent.optimizer.param_groups[0]['lr']
-                if current_lr != args.lr:
-                    stability_info += f", Current LR={current_lr:.6f}"
             
             logger.info(f"Stats: Win Rate={win_rate:.2f}, Avg Steps={avg_steps:.1f}, Max Turns Rate={max_turns_rate:.2f}")
-            logger.info(f"Stability: High Losses={high_loss_count}{stability_info}")
             
             # Save charts every 1000 episodes
             if (episode + 1) % 1000 == 0:

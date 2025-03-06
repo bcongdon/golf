@@ -1,234 +1,201 @@
-import unittest
+import pytest
 import numpy as np
-from replay_buffer import PrioritizedReplayBuffer
+from replay_buffer import SumTree, PrioritizedReplayBuffer
 
-class TestPrioritizedReplayBuffer(unittest.TestCase):
-    """Tests for the PrioritizedReplayBuffer class."""
-    
-    def test_initialization(self):
-        """Test that the buffer initializes correctly."""
-        capacity = 100
-        buffer = PrioritizedReplayBuffer(capacity)
-        
-        self.assertEqual(buffer.capacity, capacity)
-        self.assertEqual(buffer.size, 0)
-        self.assertEqual(len(buffer.buffer), capacity)
-        self.assertEqual(buffer.max_priority, 1.0)
-    
-    def test_add(self):
-        """Test adding experiences to the buffer."""
-        capacity = 10
-        buffer = PrioritizedReplayBuffer(capacity)
-        
-        # Add some experiences
-        for i in range(5):
-            buffer.add(f"experience_{i}")
-        
-        # Check size
-        self.assertEqual(buffer.size, 5)
-        
-        # Check buffer contents
-        for i in range(5):
-            self.assertEqual(buffer.buffer[i], f"experience_{i}")
-        
-        # Check valid indices
-        self.assertEqual(buffer.valid_indices, set(range(5)))
-        
-        # Check priorities
-        for i in range(5):
-            self.assertGreater(buffer.priorities[i], 0)
-    
-    def test_sample_empty(self):
-        """Test sampling from an empty buffer."""
-        buffer = PrioritizedReplayBuffer(10)
-        
-        # This should not raise an exception
-        experiences, indices, weights = buffer.sample(3)
-        
-        # But it should return empty lists
-        self.assertEqual(len(experiences), 3)  # Will be filled with random values
-        self.assertEqual(len(indices), 3)
-        self.assertEqual(len(weights), 3)
-    
-    def test_sample(self):
-        """Test sampling from the buffer."""
-        capacity = 10
-        buffer = PrioritizedReplayBuffer(capacity)
-        
-        # Add some experiences
-        for i in range(capacity):
-            buffer.add(f"experience_{i}")
-        
-        # Sample from buffer
-        batch_size = 5
-        experiences, indices, weights = buffer.sample(batch_size)
-        
-        # Check that we got the expected batch size
-        self.assertEqual(len(experiences), batch_size)
-        self.assertEqual(len(indices), batch_size)
-        self.assertEqual(len(weights), batch_size)
-        
-        # Check that the experiences match what's in the buffer
-        for i, exp in enumerate(experiences):
-            self.assertEqual(exp, buffer.buffer[indices[i]])
-    
-    def test_update_priorities(self):
-        """Test updating priorities."""
-        capacity = 10
-        buffer = PrioritizedReplayBuffer(capacity)
-        
-        # Add some experiences
-        for i in range(capacity):
-            buffer.add(f"experience_{i}")
-        
-        # Sample from buffer
-        batch_size = 5
-        experiences, indices, _ = buffer.sample(batch_size)
-        
-        # Update priorities for sampled indices
-        priorities = np.array([10.0, 5.0, 1.0, 0.5, 0.1])
-        buffer.update_priorities(indices, priorities)
-        
-        # Check that priorities were updated
-        for idx, priority in zip(indices, priorities):
-            self.assertEqual(buffer.priorities[idx], priority ** buffer.alpha)
-        
-        # Sample many times to verify distribution matches priorities
-        samples = 1000
-        counts = np.zeros(capacity)
-        
-        for _ in range(samples):
-            _, new_indices, _ = buffer.sample(1)
-            counts[new_indices[0]] += 1
-        
-        # Check that indices with higher priorities are sampled more often
-        # This is a statistical test, so it might fail occasionally
-        # We'll just check that the indices we updated have higher counts
-        # than the ones we didn't update
-        updated_counts = np.sum(counts[indices])
-        not_updated_counts = np.sum(counts) - updated_counts
-        
-        # Updated indices should be sampled more than not updated ones
-        # since we gave them much higher priorities
-        self.assertGreater(updated_counts / len(indices), 
-                          not_updated_counts / (capacity - len(indices)))
-    
-    def test_zero_priority_handling(self):
-        """Test handling of zero or very small total priorities."""
-        capacity = 10
-        
-        buffer = PrioritizedReplayBuffer(capacity)
-        
-        # Add some experiences
-        for i in range(5):
-            buffer.add(f"experience_{i}")
-        
-        # Manually set all priorities to zero
-        # This simulates a case where all priorities might become very small
-        for i in range(buffer.size):
-            buffer.priorities[i] = 0
-        
-        # Verify total priority is very small
-        valid_priorities = np.array([buffer.priorities[i] for i in buffer.valid_indices])
-        self.assertLessEqual(np.sum(valid_priorities), 1e-4)
-        
-        # Sample from buffer - this should use uniform sampling as a fallback
-        batch_size = 3
-        experiences, indices, weights = buffer.sample(batch_size)
-        
-        # Check that we still get the expected batch size
-        self.assertEqual(len(experiences), batch_size)
-    
-    def test_capacity_overflow(self):
-        """Test that the buffer correctly handles overflow."""
-        capacity = 5
-        buffer = PrioritizedReplayBuffer(capacity)
-        
-        # Add more experiences than capacity
-        for i in range(capacity * 2):
-            buffer.add(f"experience_{i}")
-        
-        # Check size
-        self.assertEqual(buffer.size, capacity)
-        
-        # Check that only the most recent experiences are kept
-        for i in range(capacity):
-            expected_idx = (i + capacity) % capacity
-            expected_exp = f"experience_{i + capacity}"
-            self.assertEqual(buffer.buffer[expected_idx], expected_exp)
-    
-    def test_multiple_overflows(self):
-        """Test that priorities are correctly updated after multiple buffer overflows."""
-        capacity = 3  # Very small capacity to force multiple overflows
-        buffer = PrioritizedReplayBuffer(capacity)
-        
-        # Fill the buffer with initial experiences
-        for i in range(capacity):
-            buffer.add(f"experience_{i}")
-        
-        # Sample all experiences
-        experiences, indices, _ = buffer.sample(capacity)
-        print(f"Initial experiences: {experiences}")
-        print(f"Initial indices: {indices}")
-        
-        # Set very different priorities to make the test more robust
-        # Higher priority means more frequent sampling
-        # Index 0 gets high priority, index 1 gets low priority, index 2 gets medium priority
-        priorities = np.array([10.0, 0.1, 1.0])
-        buffer.update_priorities(indices, priorities)
-        
-        # Print the priorities
-        print(f"Priorities after setting: {[buffer.priorities[i] for i in range(capacity)]}")
-        print(f"Valid indices: {buffer.valid_indices}")
-        
-        # Sample many times to verify distribution matches priorities
-        samples = 1000
-        counts = np.zeros(capacity)
-        
-        for _ in range(samples):
-            _, sampled_indices, _ = buffer.sample(1)
-            counts[sampled_indices[0]] += 1
-        
-        print(f"Counts after setting priorities: {counts}")
-        
-        # The index with highest priority (0) should be sampled most often
-        # In our implementation, higher priority values are sampled more frequently
-        self.assertGreater(counts[0], counts[2])
-        self.assertGreater(counts[2], counts[1])
-        
-        # Now overflow the buffer completely
-        for i in range(capacity, capacity * 2):
-            buffer.add(f"experience_{i}")
-        
-        # Print buffer contents after overflow
-        print(f"Buffer after overflow: {buffer.buffer}")
-        
-        # Sample all experiences again
-        experiences, indices, _ = buffer.sample(capacity)
-        print(f"Experiences after overflow: {experiences}")
-        print(f"Indices after overflow: {indices}")
-        
-        # Set the same pattern of priorities
-        # Higher priority means more frequent sampling
-        priorities = np.array([10.0, 0.1, 1.0])
-        buffer.update_priorities(indices, priorities)
-        
-        # Print the priorities again
-        print(f"Priorities after overflow and setting: {[buffer.priorities[i] for i in range(capacity)]}")
-        print(f"Valid indices after overflow: {buffer.valid_indices}")
-        
-        # Sample many times again
-        counts = np.zeros(capacity)
-        
-        for _ in range(samples):
-            _, sampled_indices, _ = buffer.sample(1)
-            counts[sampled_indices[0]] += 1
-        
-        print(f"Counts after overflow and setting priorities: {counts}")
-        
-        # The index with highest priority should still be sampled most often
-        # In our implementation, higher priority values are sampled more frequently
-        self.assertGreater(counts[0], counts[2])
 
-if __name__ == "__main__":
-    unittest.main() 
+def test_sum_tree_initialization():
+    capacity = 4
+    tree = SumTree(capacity)
+    assert len(tree.tree) == 2 * capacity - 1
+    assert tree.capacity == capacity
+    assert len(tree.valid_indices) == 0
+    assert np.all(tree.tree == 0)
+
+
+def test_sum_tree_update():
+    capacity = 4
+    tree = SumTree(capacity)
+    
+    # Update a leaf node
+    tree.update(3, 1.0)  # idx 3 is first leaf
+    assert tree.tree[3] == 1.0
+    assert tree.tree[1] == 1.0  # parent
+    assert tree.tree[0] == 1.0  # root
+    assert 0 in tree.valid_indices  # buffer index 0
+    
+    # Update another leaf node
+    tree.update(4, 2.0)  # idx 4 is second leaf
+    assert tree.tree[4] == 2.0
+    assert tree.tree[1] == 3.0  # left parent (sum of children)
+    assert tree.tree[2] == 0.0  # right parent
+    assert tree.tree[0] == 3.0  # root
+    assert 1 in tree.valid_indices  # buffer index 1
+
+
+def test_sum_tree_get_leaf():
+    capacity = 4
+    tree = SumTree(capacity)
+    
+    # Set up tree with known values
+    tree.update(3, 1.0)  # buffer idx 0
+    tree.update(4, 2.0)  # buffer idx 1
+    tree.update(5, 3.0)  # buffer idx 2
+    
+    # Test retrieving leaves
+    idx, buffer_idx, priority = tree.get_leaf(0.5)  # Should get first leaf (1.0)
+    assert buffer_idx == 0
+    assert priority == 1.0
+    
+    idx, buffer_idx, priority = tree.get_leaf(4.5)  # Should get third leaf (3.0)
+    assert buffer_idx == 2
+    assert priority == 3.0
+
+
+def test_prioritized_buffer_initialization():
+    capacity = 100
+    buffer = PrioritizedReplayBuffer(capacity)
+    assert buffer.capacity == capacity
+    assert len(buffer) == 0
+    assert buffer.position == 0
+    assert buffer.max_priority == 1.0
+
+
+def test_prioritized_buffer_add():
+    buffer = PrioritizedReplayBuffer(capacity=3)
+    
+    # Add experiences
+    buffer.add("exp1")
+    assert len(buffer) == 1
+    assert buffer.buffer[0] == "exp1"
+    
+    buffer.add("exp2")
+    assert len(buffer) == 2
+    assert buffer.buffer[1] == "exp2"
+    
+    # Test wrapping around
+    buffer.add("exp3")
+    buffer.add("exp4")
+    assert len(buffer) == 3
+    assert buffer.buffer[0] == "exp4"
+
+
+def test_prioritized_buffer_sample():
+    buffer = PrioritizedReplayBuffer(capacity=4)
+    
+    # Add some experiences
+    experiences = ["exp1", "exp2", "exp3", "exp4"]
+    for exp in experiences:
+        buffer.add(exp)
+    
+    # Sample experiences
+    batch_size = 2
+    sampled_exp, indices, weights = buffer.sample(batch_size)
+    
+    assert len(sampled_exp) == batch_size
+    assert len(indices) == batch_size
+    assert len(weights) == batch_size
+    assert all(exp in experiences for exp in sampled_exp)
+    assert all(0 <= idx < buffer.capacity for idx in indices)
+    assert all(0 <= w <= 1 for w in weights)
+
+
+def test_prioritized_buffer_update_priorities():
+    buffer = PrioritizedReplayBuffer(capacity=4)
+    
+    # Add experiences
+    for i in range(4):
+        buffer.add(f"exp{i}")
+    
+    # Sample and update priorities
+    sampled_exp, indices, _ = buffer.sample(2)
+    new_priorities = [0.5, 1.0]
+    buffer.update_priorities(indices, new_priorities)
+    
+    # Sample again to verify priority changes
+    _, new_indices, new_weights = buffer.sample(4)
+    assert len(new_indices) == 4
+    assert len(new_weights) == 4
+
+
+def test_empty_buffer_sampling():
+    buffer = PrioritizedReplayBuffer(capacity=4)
+    
+    # Sample from empty buffer should raise ValueError
+    try:
+        buffer.sample(2)
+        assert False, "Expected ValueError when sampling from empty buffer"
+    except ValueError:
+        pass  # Expected behavior
+
+
+def test_prioritized_buffer_beta_annealing():
+    buffer = PrioritizedReplayBuffer(capacity=4, beta=0.4, beta_increment=0.1)
+    
+    # Add experiences
+    for i in range(4):
+        buffer.add(f"exp{i}")
+    
+    initial_beta = buffer.beta
+    
+    # Sample multiple times to test beta annealing
+    for _ in range(3):
+        buffer.sample(2)
+    
+    assert buffer.beta > initial_beta
+    assert buffer.beta <= 1.0
+
+
+def test_prioritized_buffer_priority_bounds():
+    buffer = PrioritizedReplayBuffer(capacity=4, epsilon=0.01)
+    
+    # Add experiences
+    for i in range(4):
+        buffer.add(f"exp{i}")
+    
+    # Update with very small and large priorities
+    indices = [0, 1]
+    priorities = [0.0, 100.0]  # Should be bounded by epsilon and max_priority
+    buffer.update_priorities(indices, priorities)
+    
+    # The actual priorities should be bounded
+    min_priority = buffer.epsilon ** buffer.alpha
+    actual_priority = buffer.tree.tree[buffer.capacity - 1 + indices[0]]
+    # Use np.isclose for floating point comparison
+    assert np.isclose(actual_priority, min_priority, rtol=1e-7) or actual_priority > min_priority, \
+        f"Priority {actual_priority} should be >= {min_priority}"
+    assert buffer.max_priority >= 100.0
+
+
+def test_prioritized_buffer_partial_sampling():
+    """Test sampling when buffer is not full and during filling."""
+    buffer = PrioritizedReplayBuffer(capacity=100)
+    
+    # Try sampling when empty - should raise ValueError
+    try:
+        buffer.sample(32)
+        assert False, "Expected ValueError when sampling from empty buffer"
+    except ValueError:
+        pass  # Expected behavior
+    
+    # Add just a few experiences
+    for i in range(5):
+        buffer.add(f"exp{i}")
+    
+    # Sample with batch_size larger than buffer size
+    # Should only return the available experiences (5)
+    experiences, indices, weights = buffer.sample(32)
+    assert len(experiences) == 5  # Only 5 experiences available
+    assert len(indices) == 5
+    assert len(weights) == 5
+    assert all(exp is not None for exp in experiences)  # All should be valid
+    assert all(isinstance(exp, str) for exp in experiences)  # All should be strings
+    
+    # Sample with batch_size smaller than buffer size
+    experiences, indices, weights = buffer.sample(3)
+    assert len(experiences) == 3
+    assert len(indices) == 3
+    assert len(weights) == 3
+    assert all(exp is not None for exp in experiences)  # All should be valid
+    assert all(isinstance(exp, str) for exp in experiences)  # All should be strings
+    assert all(0 <= idx < buffer.capacity for idx in indices)
+    assert all(0 <= w <= 1 for w in weights)

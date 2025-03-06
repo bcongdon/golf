@@ -100,13 +100,14 @@ class GolfGame:
         Each card is represented by its rank index (0-12 for A-K), with 13 representing unknown/hidden cards.
         
         The observation includes:
-        - Current player's hand (6 card indices)
-        - Opponent's visible cards (6 card indices, 13 for hidden)
-        - Discard pile top card (1 card index)
-        - Drawn card (1 card index)
-        - Revealed flags for player (6 binary values)
-        - Revealed flags for opponent (6 binary values)
-        - Game state flags (2 binary values: drawn_from_discard, final_round)
+        - Current player's hand (6 card indices, indices 0-5)
+        - Opponent's visible cards (6 card indices, indices 6-11, 13 for hidden)
+        - Discard pile top card (1 card index, index 12)
+        - Drawn card (1 card index, index 13)
+        - Revealed flags for current player (6 binary values, indices 14-19)
+        - Revealed flags for opponent (6 binary values, indices 20-25)
+        - Drawn from discard flag (1 binary value, index 26)
+        - Final round flag (1 binary value, index 27)
         
         Total: 28 dimensions
         """
@@ -115,28 +116,28 @@ class GolfGame:
         obs = np.zeros(28, dtype=np.float32)
         obs[:14] = 13  # Set all card positions to "unknown" by default
         
-        # Encode current player's hand (first 6 positions)
+        # Encode current player's hand (indices 0-5)
         for i, rank in enumerate(self.player_hands[self.current_player]):
             # For revealed cards, encode the actual rank
             if i in self.revealed_cards[self.current_player]:
                 obs[i] = rank
-                # Set revealed flag
+                # Set revealed flag (indices 14-19)
                 obs[14 + i] = 1.0
         
-        # Encode opponent's visible cards (next 6 positions)
+        # Encode opponent's visible cards (indices 6-11)
         opponent = (self.current_player + 1) % self.num_players
         for i, rank in enumerate(self.player_hands[opponent]):
             # Only encode revealed cards
             if i in self.revealed_cards[opponent]:
                 obs[6 + i] = rank
-                # Set revealed flag
+                # Set revealed flag (indices 20-25)
                 obs[20 + i] = 1.0
         
-        # Encode discard pile top card (position 12)
+        # Encode discard pile top card (index 12)
         if self.discard_pile:
             obs[12] = self.discard_pile[-1]
         
-        # Encode drawn card (position 13)
+        # Encode drawn card (index 13)
         if self.drawn_card is not None:
             obs[13] = self.drawn_card
             
@@ -423,7 +424,7 @@ class GolfGame:
             
             # Print top row
             for i in range(3):
-                if player == self.current_player or i in revealed:
+                if i in revealed:
                     rank = hand[i]
                     rank_str = "A23456789TJQK"[rank]
                     print(f"{rank_str} ", end="")
@@ -433,7 +434,7 @@ class GolfGame:
             
             # Print bottom row
             for i in range(3, 6):
-                if player == self.current_player or i in revealed:
+                if i in revealed:
                     rank = hand[i]
                     rank_str = "A23456789TJQK"[rank]
                     print(f"{rank_str} ", end="")

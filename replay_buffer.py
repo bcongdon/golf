@@ -20,6 +20,11 @@ class SumTree:
         self.capacity = capacity
         self.tree = np.zeros(2 * capacity - 1, dtype=np.float32)
         self.valid_indices = set()  # Track valid indices
+        self.buffer_ref = None  # Reference to the buffer for checking None values
+    
+    def set_buffer_reference(self, buffer_ref):
+        """Set a reference to the buffer for checking None values."""
+        self.buffer_ref = buffer_ref
     
     def total_priority(self) -> float:
         """
@@ -103,6 +108,16 @@ class SumTree:
         if left >= len(self.tree):
             # Convert tree index to buffer index
             buffer_idx = idx - (self.capacity - 1)
+            
+            # Check if this index points to a None value in the buffer
+            if self.buffer_ref is not None and buffer_idx < len(self.buffer_ref) and self.buffer_ref[buffer_idx] is None:
+                # If it points to None, return a valid index instead
+                if self.valid_indices:
+                    # Use a random valid index
+                    valid_idx = random.choice(list(self.valid_indices))
+                    tree_idx = valid_idx + (self.capacity - 1)
+                    return tree_idx, valid_idx, max(self.tree[tree_idx], 1e-5)
+            
             return idx, buffer_idx, max(self.tree[idx], 1e-5)  # Ensure non-zero priority
         
         # Otherwise, go left or right based on value
@@ -138,12 +153,12 @@ class PrioritizedReplayBuffer:
         self.beta_increment = beta_increment
         self.epsilon = epsilon
         
-        # Initialize buffer and priorities
+        # Initialize buffer and sum tree for priorities
         self.buffer = [None] * capacity
-        self.priorities = np.zeros(capacity, dtype=np.float32)
+        self.tree = SumTree(capacity)
         
-        # Track valid indices (indices with actual experiences)
-        self.valid_indices = set()
+        # Set buffer reference in the tree
+        self.tree.set_buffer_reference(self.buffer)
         
         # Track current size and position
         self.size = 0
@@ -159,6 +174,11 @@ class PrioritizedReplayBuffer:
         Args:
             experience: Experience to add (can be any object)
         """
+        # Skip None experiences
+        if experience is None:
+            print("Warning: Attempted to add None experience to replay buffer")
+            return
+            
         # Get the next available index
         idx = self.position
         
@@ -167,10 +187,7 @@ class PrioritizedReplayBuffer:
         
         # Update priority with max priority for new experience
         # Using max priority ensures new experiences are sampled at least once
-        self.priorities[idx] = self.max_priority ** self.alpha
-        
-        # Add to valid indices
-        self.valid_indices.add(idx)
+        self.tree.update(idx + self.capacity - 1, self.max_priority ** self.alpha)
         
         # Update position
         self.position = (self.position + 1) % self.capacity
@@ -187,64 +204,81 @@ class PrioritizedReplayBuffer:
             
         Returns:
             Tuple of (experiences, indices, weights)
+            Note: Will return at most min(batch_size, self.size) experiences.
+            If buffer is empty, will raise ValueError.
         """
+        # If buffer is empty, raise an error
+        if self.size == 0:
+            raise ValueError("Cannot sample from an empty buffer")
+        
+        # Get valid indices (non-None experiences)
+        valid_indices = []
+        for i in range(self.size):
+            if self.buffer[i] is not None:
+                valid_indices.append(i)
+        
+        # If no valid experiences, raise an error
+        if not valid_indices:
+            raise ValueError("No valid experiences in buffer")
+        
+        # Adjust batch_size to not exceed the number of valid experiences
+        actual_batch_size = min(batch_size, len(valid_indices))
+        
         # Initialize arrays for indices and weights
-        indices = np.zeros(batch_size, dtype=np.int32)
-        weights = np.zeros(batch_size, dtype=np.float32)
+        indices = np.zeros(actual_batch_size, dtype=np.int32)
+        weights = np.zeros(actual_batch_size, dtype=np.float32)
         experiences = []
         
-        # If buffer is empty, return empty arrays
-        if self.size == 0:
-            return [None] * batch_size, indices, weights
-        
-        # Get valid indices and their priorities
-        valid_indices = list(self.valid_indices)
-        print(f"DEBUG: Valid indices: {valid_indices}")
-        
-        # Get priorities for valid indices
-        valid_priorities = self.priorities[valid_indices]
-        print(f"DEBUG: Priorities: {valid_priorities}")
-        
-        # Calculate total priority
-        total_priority = np.sum(valid_priorities)
-        print(f"DEBUG: Total priority: {total_priority}")
+        # Get total priority
+        total_priority = self.tree.total_priority()
         
         # If total priority is too small, use uniform sampling
         if total_priority < 1e-6:
-            sampled_indices = np.random.choice(valid_indices, size=batch_size)
+            sampled_indices = np.random.choice(valid_indices, size=actual_batch_size)
+            
             for i, idx in enumerate(sampled_indices):
                 indices[i] = idx
-                experiences.append(self.buffer[idx])
+                exp = self.buffer[idx]
+                # Double-check that the experience is not None
+                if exp is None:
+                    # This should never happen, but just in case
+                    random_idx = np.random.choice(valid_indices)
+                    exp = self.buffer[random_idx]
+                    indices[i] = random_idx
+                experiences.append(exp)
                 weights[i] = 1.0
             return experiences, indices, weights
         
+        # Calculate segment size
+        segment = total_priority / actual_batch_size
+        
         # Sample based on priorities
-        for i in range(batch_size):
-            # Sample random value between 0 and total priority
-            value = np.random.uniform(0, total_priority)
+        for i in range(actual_batch_size):
+            # Sample random value within segment
+            a = segment * i
+            b = segment * (i + 1)
+            value = np.random.uniform(a, b)
             
-            # Find index corresponding to this value
-            cumulative_priority = 0
-            for j, idx in enumerate(valid_indices):
-                cumulative_priority += valid_priorities[j]
-                if cumulative_priority > value:
-                    sampled_idx = idx
-                    sampled_priority = valid_priorities[j]
-                    break
-            else:
-                # Fallback if we didn't find an index (shouldn't happen)
-                sampled_idx = valid_indices[0]
-                sampled_priority = valid_priorities[0]
+            # Get leaf from sum tree
+            tree_idx, buffer_idx, priority = self.tree.get_leaf(value)
+            
+            # Double-check that the experience is not None
+            exp = self.buffer[buffer_idx]
+            if exp is None:
+                # This should never happen with our modified _retrieve method, but just in case
+                random_idx = np.random.choice(valid_indices)
+                buffer_idx = random_idx
+                exp = self.buffer[random_idx]
             
             # Store sampled index and experience
-            indices[i] = sampled_idx
-            experiences.append(self.buffer[sampled_idx])
+            indices[i] = buffer_idx
+            experiences.append(exp)
             
             # Calculate weight for importance sampling
             # P(i) = p_i^alpha / sum_k p_k^alpha
             # w_i = (1/N * 1/P(i))^beta = (N * sum_k p_k^alpha / p_i^alpha)^beta
-            prob = sampled_priority / total_priority
-            weight = (len(valid_indices) * prob) ** (-self.beta)
+            prob = priority / total_priority
+            weight = (self.size * prob) ** (-self.beta)
             weights[i] = weight
         
         # Normalize weights to have max weight = 1
@@ -253,6 +287,14 @@ class PrioritizedReplayBuffer:
         
         # Increment beta
         self.beta = min(1.0, self.beta + self.beta_increment)
+        
+        # Final check to ensure no None values
+        for i in range(len(experiences)):
+            if experiences[i] is None:
+                # If we still have a None, replace it with a random valid experience
+                random_idx = np.random.choice(valid_indices)
+                experiences[i] = self.buffer[random_idx]
+                indices[i] = random_idx
         
         # Return sampled experiences, indices, and weights
         return experiences, indices, weights
@@ -272,15 +314,11 @@ class PrioritizedReplayBuffer:
             # Update max priority if needed
             self.max_priority = max(self.max_priority, priority)
             
-            # Check if index is valid
-            if 0 <= idx < self.capacity:
-                # Add to valid indices
-                self.valid_indices.add(idx)
-                
-                # Update priority in the priorities array
-                self.priorities[idx] = priority ** self.alpha
-                
-                
+            # Check if index is valid and points to a non-None experience
+            if 0 <= idx < self.capacity and self.buffer[idx] is not None:
+                # Update priority in the sum tree
+                self.tree.update(idx + self.capacity - 1, priority ** self.alpha)
+    
     def __len__(self) -> int:
         """
         Get current size of buffer.

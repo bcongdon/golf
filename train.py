@@ -56,13 +56,13 @@ def parse_args():
     parser.add_argument('--batch-size', type=int, default=128, help='Batch size for training')
     parser.add_argument('--hidden-size', type=int, default=128, help='Hidden size of the neural network')
     parser.add_argument('--embedding-dim', type=int, default=8, help='Dimension of card embeddings')
-    parser.add_argument('--lr', type=float, default=5e-5, help='Learning rate')
+    parser.add_argument('--lr', type=float, default=1e-4, help='Learning rate')
     parser.add_argument('--gamma', type=float, default=0.975, help='Discount factor')
     parser.add_argument('--epsilon-start', type=float, default=1.0, help='Starting epsilon for exploration')
     parser.add_argument('--epsilon-end', type=float, default=0.05, help='Minimum epsilon for exploration')
     parser.add_argument('--epsilon-decay-episodes', type=int, default=90000, help='Number of episodes to decay epsilon from start to end')
     parser.add_argument('--epsilon-warmup', type=int, default=10000, help='Number of episodes to keep epsilon at start value')
-    parser.add_argument('--target-update', type=int, default=250, help='Target network update frequency')
+    parser.add_argument('--target-update', type=int, default=500, help='Target network update frequency')
     parser.add_argument('--eval-interval', type=int, default=500, help='Evaluation interval')
     parser.add_argument('--load-model', type=str, default=None, help='Path to load model from')
     parser.add_argument('--log-level', type=str, default='INFO', 
@@ -80,6 +80,14 @@ def parse_args():
                         help='Learn every N steps to reduce overhead')
     parser.add_argument('--use-huber-loss', action='store_true', 
                         help='Use Huber loss instead of MSE for better stability')
+    parser.add_argument('--use-per', action='store_true',
+                        help='Use Prioritized Experience Replay (PER)')
+    parser.add_argument('--per-alpha', type=float, default=0.7,
+                        help='Alpha parameter for PER (0 = uniform, 1 = full prioritization)')
+    parser.add_argument('--per-beta', type=float, default=0.5,
+                        help='Initial beta parameter for PER importance sampling')
+    parser.add_argument('--per-beta-increment', type=float, default=0.0001,
+                        help='Increment for beta parameter over time')
     parser.add_argument('--segment-tree', action='store_true', 
                         help='Use segment tree for more efficient sampling in replay buffer')
     parser.add_argument('--optimize-memory', action='store_true', 
@@ -101,15 +109,21 @@ def evaluate_agent(agent, num_episodes=100, logger=None):
     random_rewards = []
     random_wins = 0
     random_losses = 0
-    random_scores = []
-    random_opponent_scores = []
+    random_ties = 0
+    random_scores = []  # All scores
+    random_scores_no_ties = []  # Scores excluding ties
+    random_opponent_scores = []  # All opponent scores
+    random_opponent_scores_no_ties = []  # Opponent scores excluding ties
     
     # Metrics for reflex opponent
     reflex_rewards = []
     reflex_wins = 0
     reflex_losses = 0
-    reflex_scores = []
-    reflex_opponent_scores = []
+    reflex_ties = 0
+    reflex_scores = []  # All scores
+    reflex_scores_no_ties = []  # Scores excluding ties
+    reflex_opponent_scores = []  # All opponent scores
+    reflex_opponent_scores_no_ties = []  # Opponent scores excluding ties
     
     # Track Q-values during evaluation
     q_values_list = []
@@ -161,46 +175,72 @@ def evaluate_agent(agent, num_episodes=100, logger=None):
                         random_rewards.append(episode_reward)
                         random_scores.append(agent_score)
                         random_opponent_scores.append(opponent_score)
-                        if agent_score > opponent_score:
+                        
+                        if agent_score < opponent_score:
                             random_wins += 1
-                        elif agent_score < opponent_score:
+                            # Add to non-tie scores
+                            random_scores_no_ties.append(agent_score)
+                            random_opponent_scores_no_ties.append(opponent_score)
+                        elif agent_score > opponent_score:
                             random_losses += 1
+                            # Add to non-tie scores
+                            random_scores_no_ties.append(agent_score)
+                            random_opponent_scores_no_ties.append(opponent_score)
+                        else:
+                            random_ties += 1
                     else:  # reflex
                         reflex_rewards.append(episode_reward)
                         reflex_scores.append(agent_score)
                         reflex_opponent_scores.append(opponent_score)
-                        if agent_score > opponent_score:
+                        
+                        if agent_score < opponent_score:
                             reflex_wins += 1
-                        elif agent_score < opponent_score:
+                            # Add to non-tie scores
+                            reflex_scores_no_ties.append(agent_score)
+                            reflex_opponent_scores_no_ties.append(opponent_score)
+                        elif agent_score > opponent_score:
                             reflex_losses += 1
+                            # Add to non-tie scores
+                            reflex_scores_no_ties.append(agent_score)
+                            reflex_opponent_scores_no_ties.append(opponent_score)
+                        else:
+                            reflex_ties += 1
     
     # Calculate metrics
+    # Use non-tie scores for average score calculations
+    random_avg_score = np.mean(random_scores_no_ties) if random_scores_no_ties else 0
+    random_avg_opponent_score = np.mean(random_opponent_scores_no_ties) if random_opponent_scores_no_ties else 0
+    
+    reflex_avg_score = np.mean(reflex_scores_no_ties) if reflex_scores_no_ties else 0
+    reflex_avg_opponent_score = np.mean(reflex_opponent_scores_no_ties) if reflex_opponent_scores_no_ties else 0
+    
     random_metrics = {
         'avg_reward': np.mean(random_rewards),
         'win_rate': random_wins / (num_episodes / 2),
         'loss_rate': random_losses / (num_episodes / 2),
-        'avg_score': np.mean(random_scores),
-        'score_diff': np.mean(random_opponent_scores) - np.mean(random_scores)
+        'tie_rate': random_ties / (num_episodes / 2),
+        'avg_score': random_avg_score,
+        'score_diff': random_avg_opponent_score - random_avg_score
     }
     
     reflex_metrics = {
         'avg_reward': np.mean(reflex_rewards),
         'win_rate': reflex_wins / (num_episodes / 2),
         'loss_rate': reflex_losses / (num_episodes / 2),
-        'avg_score': np.mean(reflex_scores),
-        'score_diff': np.mean(reflex_opponent_scores) - np.mean(reflex_scores)
+        'tie_rate': reflex_ties / (num_episodes / 2),
+        'avg_score': reflex_avg_score,
+        'score_diff': reflex_avg_opponent_score - reflex_avg_score
     }
     
     if logger:
         logger.info(f"vs Random - Win Rate: {random_metrics['win_rate']:.2f}, "
-                   f"Avg Score: {random_metrics['avg_score']:.2f}, "
+                   f"Tie Rate: {random_metrics['tie_rate']:.2f}, "
+                   f"Avg Score (excl. ties): {random_metrics['avg_score']:.2f}, "
                    f"Score Diff: {random_metrics['score_diff']:.2f}")
         logger.info(f"vs Reflex - Win Rate: {reflex_metrics['win_rate']:.2f}, "
-                   f"Avg Score: {reflex_metrics['avg_score']:.2f}, "
+                   f"Tie Rate: {reflex_metrics['tie_rate']:.2f}, "
+                   f"Avg Score (excl. ties): {reflex_metrics['avg_score']:.2f}, "
                    f"Score Diff: {reflex_metrics['score_diff']:.2f}")
-    
-    # Set agent back to training mode
-    agent.q_network.train()
     
     # Calculate Q-value statistics
     q_stats = {}
@@ -208,15 +248,21 @@ def evaluate_agent(agent, num_episodes=100, logger=None):
         q_stats = {
             'mean': np.mean(q_values_list),
             'min': np.min(q_values_list),
-            'max': np.max(q_values_list),
-            'std': np.std(q_values_list)
+            'max': np.max(q_values_list)
         }
     
-    return (random_metrics['avg_reward'], random_metrics['win_rate'], 
-            random_metrics['loss_rate'], random_metrics['score_diff'],
-            reflex_metrics['avg_reward'], reflex_metrics['win_rate'],
-            reflex_metrics['loss_rate'], reflex_metrics['score_diff'],
-            q_stats)
+    # Return metrics for tracking
+    return (
+        random_metrics['avg_reward'],
+        random_metrics['win_rate'],
+        random_metrics['loss_rate'],
+        random_metrics['score_diff'],
+        reflex_metrics['avg_reward'],
+        reflex_metrics['win_rate'],
+        reflex_metrics['loss_rate'],
+        reflex_metrics['score_diff'],
+        q_stats
+    )
 
 def train(args, logger, logs_dir):
     """Train the DQN agent."""
@@ -264,7 +310,7 @@ def train(args, logger, logs_dir):
     state_size = (2 * cards_per_player  # Player hands
                  + 2  # Discard and drawn card
                  + 2 * cards_per_player  # Revealed flags
-                 + 2)  # Drawn from discard and final round flags
+                 + 3)  # Drawn from discard, final round flags, and turn progress
     action_size = len(Action)  # Number of possible actions
     logger.info(f"Environment initialized with state_size={state_size}, action_size={action_size}")
     
@@ -289,9 +335,10 @@ def train(args, logger, logs_dir):
         batch_size=args.batch_size,
         target_update=args.target_update,
         # PER parameters
-        per_alpha=0.4,       # How much prioritization to use (0 = none, 1 = full)
-        per_beta=0.4,        # Start value for importance sampling (0 = no correction, 1 = full)
-        per_beta_increment=0.000001  # Beta increment per learning step
+        use_per=args.use_per,  # Whether to use prioritized experience replay
+        per_alpha=args.per_alpha,  # How much prioritization to use (0 = none, 1 = full)
+        per_beta=args.per_beta,  # Start value for importance sampling (0 = no correction, 1 = full)
+        per_beta_increment=args.per_beta_increment  # Beta increment per learning step
     )
     
     # Apply optimization settings
@@ -299,6 +346,12 @@ def train(args, logger, logs_dir):
         agent.use_amp = True
         agent.scaler = torch.cuda.amp.GradScaler()
         logger.info("Enabled mixed precision training for faster computation")
+    
+    # Log replay buffer information
+    if args.use_per:
+        logger.info(f"Using Prioritized Experience Replay (PER) with alpha={args.per_alpha}, beta={args.per_beta}")
+    else:
+        logger.info("Using standard (uniform) experience replay")
     
     # Log device information
     device_info = f"Using device: {agent.device}"
@@ -328,10 +381,6 @@ def train(args, logger, logs_dir):
         agent.load(args.load_model)
         logger.info(f"Loaded model from {args.load_model}")
     
-    # Initialize opponent pool for self-play
-    opponent_pool = []  # Will store snapshots of the agent at different training stages
-    opponent_pool_size = 5  # Maximum number of past versions to keep
-    opponent_update_frequency = 2000  # Add to pool every N episodes
     
     # Random opponent probability (will decrease over time)
     random_opponent_prob = 0.7  # Start with high probability of random opponent
@@ -534,25 +583,30 @@ def train(args, logger, logs_dir):
     
     # Function to select opponent action (to avoid code duplication)
     def select_opponent_action(state, valid_actions):
-        # Use reflex agent with probability min(1 - epsilon, 0.1)
-        if random.random() < min(0.1, 1 - agent.epsilon):
-            # Use the correct reflex agent based on the current player position
+        # Determine opponent type based on training phase (probabilistic approach)
+        # As epsilon decreases, we transition from random → reflex → self-play
+        random_prob = agent.epsilon  # Highest when epsilon is high (early training)
+        reflex_prob = 4 * agent.epsilon * (1 - agent.epsilon)  # Peaks in middle of training
+        selfplay_prob = (1 - agent.epsilon) ** 2  # Highest when epsilon is low (late training)
+        
+        # Normalize probabilities to sum to 1
+        total_prob = random_prob + reflex_prob + selfplay_prob
+        random_prob /= total_prob
+        reflex_prob /= total_prob
+        selfplay_prob /= total_prob
+        
+        # Choose opponent type based on probabilities
+        choice = random.random()
+        
+        if choice < random_prob:
+            # Random opponent
+            return agent.random_action(valid_actions)
+        elif choice < random_prob + reflex_prob:
+            # Reflex agent opponent
             reflex_agent = reflex_agent_0 if env.current_player == 0 else reflex_agent_1
             return reflex_agent.select_action(state, valid_actions)
-        elif random.random() < random_opponent_prob:
-            # Use random opponent with common random policy
-            return agent.random_action(valid_actions)
-        elif opponent_pool and random.random() < 0.0:  # 0% chance to use pool when available
-            # Use an agent from the opponent pool
-            opponent_idx = random.randint(0, len(opponent_pool) - 1)
-            opponent_agent = opponent_pool[opponent_idx]
-            # Set to evaluation mode for inference
-            opponent_agent.q_network.eval()
-            with torch.no_grad():
-                return opponent_agent.select_action(state, valid_actions, training=False)
         else:
-            # Use current agent with high exploration
-            # Temporarily increase epsilon for more exploration
+            # Self-play (with some exploration)
             original_epsilon = agent.epsilon
             agent.epsilon = max(0.1, agent.epsilon)  # At least 10% exploration
             action = agent.select_action(state, valid_actions, training=True)
@@ -745,45 +799,13 @@ def train(args, logger, logs_dir):
             # Check if max turns was reached
             if done and "max_turns_reached" in info and info["max_turns_reached"]:
                 max_turns_reached = True
-            
-            # After episode ends, update reflex agent stats if applicable
-            if is_reflex_opponent:
-                reflex_agent_games += 1
-                if episode_reward > 0:
-                    reflex_agent_wins += 1
-                elif episode_reward < 0:
-                    reflex_agent_losses += 1
-                
-                # Track score difference against reflex agent
-                if "scores" in info:
-                    agent_score = info["scores"][0]
-                    reflex_score = info["scores"][1]
-                    reflex_agent_score_diff += (reflex_score - agent_score)
-        
-        # Add current agent to opponent pool periodically
-        if (episode + 1) % opponent_update_frequency == 0:
-            # Create a deep copy of the current agent
-            import copy
-            opponent_snapshot = copy.deepcopy(agent)
-            
-            # Add to pool, maintaining maximum size
-            opponent_pool.append(opponent_snapshot)
-            if len(opponent_pool) > opponent_pool_size:
-                # Remove oldest snapshot
-                opponent_pool.pop(0)
-            
-            logger.info(f"Added agent snapshot to opponent pool (size: {len(opponent_pool)})")
-            
-            # Decay random opponent probability
-            random_opponent_prob *= random_opponent_decay
-            logger.info(f"Random opponent probability decayed to {random_opponent_prob:.4f}")
         
         # Record metrics
         rewards.append(episode_reward)
         episode_steps.append(steps)
         
         # Track wins and max turns
-        if episode_reward > 0:
+        if info["scores"][0] > info["scores"][1]:
             win_count += 1
         if max_turns_reached:
             max_turns_reached_count += 1

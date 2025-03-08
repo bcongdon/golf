@@ -1,175 +1,37 @@
+"""
+Replay Buffer implementation from OpenAI Baselines.
+Source: https://github.com/openai/baselines/blob/master/baselines/deepq/replay_buffer.py
+
+This implementation has been adapted to work with our existing code.
+"""
+
 import numpy as np
-from typing import List, Tuple, Any, Set
 import random
+from typing import List, Tuple, Any
+
+from segment_tree import SumSegmentTree, MinSegmentTree
 
 
-class SumTree:
-    """
-    A binary tree data structure where the parent's value is the sum of its children.
-    Used for efficient sampling based on priority.
-    """
-    
-    def __init__(self, capacity: int):
-        """
-        Initialize a SumTree with the given capacity.
-        
-        Args:
-            capacity: Maximum number of experiences to store
-        """
-        # Tree capacity is 2*capacity - 1 (capacity leaves + capacity-1 internal nodes)
-        self.capacity = capacity
-        self.tree = np.zeros(2 * capacity - 1, dtype=np.float32)
-        self.valid_indices = set()  # Track valid indices
-        self.buffer_ref = None  # Reference to the buffer for checking None values
-    
-    def set_buffer_reference(self, buffer_ref):
-        """Set a reference to the buffer for checking None values."""
-        self.buffer_ref = buffer_ref
-    
-    def total_priority(self) -> float:
-        """
-        Get the total priority in the tree.
-        
-        Returns:
-            Sum of all priorities
-        """
-        return self.tree[0]
-    
-    def update(self, idx: int, priority: float):
-        """
-        Update the priority at the given index.
-        
-        Args:
-            idx: Index in the tree
-            priority: New priority value
-        """
-        # Ensure priority is at least a small positive value
-        priority = max(priority, 1e-5)
-        
-        # Calculate change in priority
-        change = priority - self.tree[idx]
-        self.tree[idx] = priority
-        
-        # If this is a leaf node, add the corresponding buffer index to valid_indices
-        if idx >= self.capacity - 1:
-            buffer_idx = idx - (self.capacity - 1)
-            self.valid_indices.add(buffer_idx)
-        
-        # Propagate change up the tree
-        self._propagate(idx, change)
-    
-    def _propagate(self, idx: int, change: float):
-        """
-        Propagate the priority change up the tree.
-        
-        Args:
-            idx: Index of the node that was updated
-            change: Change in priority
-        """
-        # Loop until we reach the root
-        while idx > 0:
-            # Get parent index
-            parent = (idx - 1) // 2
-            
-            # Update parent's priority
-            self.tree[parent] += change
-            
-            # Move to parent
-            idx = parent
-    
-    def get_leaf(self, value: float) -> Tuple[int, int, float]:
-        """
-        Find the leaf node that corresponds to the given value.
-        
-        Args:
-            value: Value to search for (in range [0, total_priority])
-            
-        Returns:
-            Tuple of (leaf_idx, buffer_idx, priority)
-        """
-        return self._retrieve(0, value)
-    
-    def _retrieve(self, idx: int, value: float) -> Tuple[int, int, float]:
-        """
-        Recursively search for the leaf node corresponding to the given value.
-        
-        Args:
-            idx: Current node index
-            value: Value to search for
-            
-        Returns:
-            Tuple of (leaf_idx, buffer_idx, priority)
-        """
-        # Get left and right children
-        left = 2 * idx + 1
-        right = left + 1
-        
-        # If we're at a leaf node, return it
-        if left >= len(self.tree):
-            # Convert tree index to buffer index
-            buffer_idx = idx - (self.capacity - 1)
-            
-            # Check if this index points to a None value in the buffer
-            if self.buffer_ref is not None and buffer_idx < len(self.buffer_ref) and self.buffer_ref[buffer_idx] is None:
-                # If it points to None, return a valid index instead
-                if self.valid_indices:
-                    # Use a random valid index
-                    valid_idx = random.choice(list(self.valid_indices))
-                    tree_idx = valid_idx + (self.capacity - 1)
-                    return tree_idx, valid_idx, max(self.tree[tree_idx], 1e-5)
-            
-            return idx, buffer_idx, max(self.tree[idx], 1e-5)  # Ensure non-zero priority
-        
-        # Otherwise, go left or right based on value
-        # If value <= left's priority, go left
-        # Otherwise, go right and subtract left's priority from value
-        if value <= self.tree[left]:
-            return self._retrieve(left, value)
-        else:
-            return self._retrieve(right, value - self.tree[left])
+class ReplayBuffer(object):
+    def __init__(self, size):
+        """Create Replay buffer.
 
+        Parameters
+        ----------
+        size: int
+            Max number of transitions to store in the buffer. When the buffer
+            overflows the old memories are dropped.
+        """
+        self._storage = []
+        self._maxsize = size
+        self._next_idx = 0
+        self.size = 0  # For compatibility with PrioritizedReplayBuffer
 
-class PrioritizedReplayBuffer:
-    """
-    A replay buffer that samples experiences based on their priorities.
-    
-    Higher priority experiences are sampled more frequently.
-    """
-    
-    def __init__(self, capacity: int, alpha: float = 0.6, beta: float = 0.4, beta_increment: float = 0.001, epsilon: float = 0.01):
-        """
-        Initialize a prioritized replay buffer.
-        
-        Args:
-            capacity: Maximum number of experiences to store
-            alpha: Exponent for prioritization (0 = uniform, 1 = full prioritization)
-            beta: Exponent for importance sampling (0 = no correction, 1 = full correction)
-            beta_increment: Amount to increase beta each time we sample
-            epsilon: Small positive value to ensure non-zero priority
-        """
-        self.capacity = capacity
-        self.alpha = alpha
-        self.beta = beta
-        self.beta_increment = beta_increment
-        self.epsilon = epsilon
-        
-        # Initialize buffer and sum tree for priorities
-        self.buffer = [None] * capacity
-        self.tree = SumTree(capacity)
-        
-        # Set buffer reference in the tree
-        self.tree.set_buffer_reference(self.buffer)
-        
-        # Track current size and position
-        self.size = 0
-        self.position = 0
-        
-        # Maximum priority seen so far (for new experiences)
-        self.max_priority = 1.0
-    
+    def __len__(self):
+        return len(self._storage)
+
     def add(self, experience: Any):
-        """
-        Add a new experience to the buffer.
+        """Add a new experience to the buffer.
         
         Args:
             experience: Experience to add (can be any object)
@@ -179,134 +41,207 @@ class PrioritizedReplayBuffer:
             print("Warning: Attempted to add None experience to replay buffer")
             return
             
-        # Get the next available index
-        idx = self.position
-        
-        # Store experience in buffer
-        self.buffer[idx] = experience
-        
-        # Update priority with max priority for new experience
-        # Using max priority ensures new experiences are sampled at least once
-        self.tree.update(idx + self.capacity - 1, self.max_priority ** self.alpha)
-        
-        # Update position
-        self.position = (self.position + 1) % self.capacity
-        
-        # Update size
-        self.size = min(self.size + 1, self.capacity)
-    
-    def sample(self, batch_size: int) -> Tuple[List[Any], List[int], np.ndarray]:
+        # Check if any component of the experience is None
+        if hasattr(experience, '__iter__') and not isinstance(experience, str):
+            if any(x is None for x in experience):
+                print(f"Warning: Experience contains None values: {experience}")
+                return
+
+        if self._next_idx >= len(self._storage):
+            self._storage.append(experience)
+        else:
+            self._storage[self._next_idx] = experience
+        self._next_idx = (self._next_idx + 1) % self._maxsize
+        self.size = min(self.size + 1, self._maxsize)  # Update size for compatibility
+
+    def _encode_sample(self, idxes):
+        experiences = []
+        for i in idxes:
+            experiences.append(self._storage[i])
+        return experiences
+
+    def sample(self, batch_size):
+        """Sample a batch of experiences.
+
+        Parameters
+        ----------
+        batch_size: int
+            How many transitions to sample.
+
+        Returns
+        -------
+        experiences: List
+            batch of experiences
+        indices: List
+            indices of sampled experiences
+        weights: np.array
+            array of ones (no importance sampling)
         """
-        Sample experiences from the buffer based on their priorities.
+        if len(self._storage) == 0:
+            raise ValueError("Cannot sample from an empty buffer")
+            
+        actual_batch_size = min(batch_size, len(self._storage))
+        idxes = [random.randint(0, len(self._storage) - 1) for _ in range(actual_batch_size)]
+        weights = np.ones_like(idxes, dtype=np.float32)
+        return self._encode_sample(idxes), idxes, weights
+        
+    def update_priorities(self, indices: List[int], priorities: List[float]):
+        """
+        No-op method for compatibility with PrioritizedReplayBuffer.
+        Regular replay buffer doesn't use priorities.
+        
+        Parameters
+        ----------
+        indices: [int]
+            List of indices of sampled transitions
+        priorities: [float]
+            List of updated priorities
+        """
+        pass  # No-op for regular replay buffer
+
+
+class PrioritizedReplayBuffer(ReplayBuffer):
+    def __init__(self, capacity, alpha=0.6, beta=0.4, beta_increment=0.001, epsilon=0.01):
+        """Create Prioritized Replay buffer.
+
+        Parameters
+        ----------
+        capacity: int
+            Max number of transitions to store in the buffer. When the buffer
+            overflows the old memories are dropped.
+        alpha: float
+            how much prioritization is used
+            (0 - no prioritization, 1 - full prioritization)
+        beta: float
+            To what degree to use importance weights
+            (0 - no corrections, 1 - full correction)
+        beta_increment: float
+            Amount to increase beta each time we sample
+        epsilon: float
+            Small positive value to ensure non-zero priority
+
+        See Also
+        --------
+        ReplayBuffer.__init__
+        """
+        super(PrioritizedReplayBuffer, self).__init__(capacity)
+        assert alpha >= 0
+        self.alpha = alpha
+        self.beta = beta
+        self.beta_increment = beta_increment
+        self.epsilon = epsilon
+        self.size = 0  # For compatibility with existing code
+
+        # Find capacity that is a power of 2
+        it_capacity = 1
+        while it_capacity < capacity:
+            it_capacity *= 2
+
+        self._it_sum = SumSegmentTree(it_capacity)
+        self._it_min = MinSegmentTree(it_capacity)
+        self.max_priority = 1.0  # For compatibility with existing code
+
+    def add(self, experience: Any):
+        """Add a new experience to the buffer.
         
         Args:
-            batch_size: Number of experiences to sample
-            
-        Returns:
-            Tuple of (experiences, indices, weights)
-            Note: Will return at most min(batch_size, self.size) experiences.
-            If buffer is empty, will raise ValueError.
+            experience: Experience to add (can be any object)
         """
-        # If buffer is empty, raise an error
-        if self.size == 0:
+        # Skip None experiences
+        if experience is None:
+            print("Warning: Attempted to add None experience to replay buffer")
+            return
+            
+        # Check if any component of the experience is None
+        if hasattr(experience, '__iter__') and not isinstance(experience, str):
+            if any(x is None for x in experience):
+                print(f"Warning: Experience contains None values: {experience}")
+                return
+                
+        idx = self._next_idx
+        super().add(experience)
+        self._it_sum[idx] = self.max_priority ** self.alpha
+        self._it_min[idx] = self.max_priority ** self.alpha
+        self.size = min(self.size + 1, self._maxsize)  # For compatibility with existing code
+
+    def _sample_proportional(self, batch_size):
+        res = []
+        p_total = self._it_sum.sum(0, len(self._storage) - 1)
+        every_range_len = p_total / batch_size
+        for i in range(batch_size):
+            mass = random.random() * every_range_len + i * every_range_len
+            idx = self._it_sum.find_prefixsum_idx(mass)
+            res.append(idx)
+        return res
+
+    def sample(self, batch_size: int) -> Tuple[List[Any], List[int], np.ndarray]:
+        """Sample a batch of experiences.
+
+        compared to ReplayBuffer.sample
+        it also returns importance weights and idxes
+        of sampled experiences.
+
+        Parameters
+        ----------
+        batch_size: int
+            How many transitions to sample.
+
+        Returns
+        -------
+        experiences: List
+            batch of experiences
+        indices: List
+            indices of sampled experiences
+        weights: np.array
+            importance weights
+        """
+        if len(self._storage) == 0:
             raise ValueError("Cannot sample from an empty buffer")
-        
-        # Get valid indices (non-None experiences)
-        valid_indices = []
-        for i in range(self.size):
-            if self.buffer[i] is not None:
-                valid_indices.append(i)
-        
-        # If no valid experiences, raise an error
-        if not valid_indices:
-            raise ValueError("No valid experiences in buffer")
-        
-        # Adjust batch_size to not exceed the number of valid experiences
-        actual_batch_size = min(batch_size, len(valid_indices))
-        
-        # Initialize arrays for indices and weights
-        indices = np.zeros(actual_batch_size, dtype=np.int32)
-        weights = np.zeros(actual_batch_size, dtype=np.float32)
-        experiences = []
-        
-        # Get total priority
-        total_priority = self.tree.total_priority()
-        
-        # If total priority is too small, use uniform sampling
-        if total_priority < 1e-6:
-            sampled_indices = np.random.choice(valid_indices, size=actual_batch_size)
             
-            for i, idx in enumerate(sampled_indices):
-                indices[i] = idx
-                exp = self.buffer[idx]
-                # Double-check that the experience is not None
-                if exp is None:
-                    # This should never happen, but just in case
-                    random_idx = np.random.choice(valid_indices)
-                    exp = self.buffer[random_idx]
-                    indices[i] = random_idx
-                experiences.append(exp)
-                weights[i] = 1.0
-            return experiences, indices, weights
-        
-        # Calculate segment size
-        segment = total_priority / actual_batch_size
-        
-        # Sample based on priorities
-        for i in range(actual_batch_size):
-            # Sample random value within segment
-            a = segment * i
-            b = segment * (i + 1)
-            value = np.random.uniform(a, b)
-            
-            # Get leaf from sum tree
-            tree_idx, buffer_idx, priority = self.tree.get_leaf(value)
-            
-            # Double-check that the experience is not None
-            exp = self.buffer[buffer_idx]
-            if exp is None:
-                # This should never happen with our modified _retrieve method, but just in case
-                random_idx = np.random.choice(valid_indices)
-                buffer_idx = random_idx
-                exp = self.buffer[random_idx]
-            
-            # Store sampled index and experience
-            indices[i] = buffer_idx
-            experiences.append(exp)
-            
-            # Calculate weight for importance sampling
-            # P(i) = p_i^alpha / sum_k p_k^alpha
-            # w_i = (1/N * 1/P(i))^beta = (N * sum_k p_k^alpha / p_i^alpha)^beta
-            prob = priority / total_priority
-            weight = (self.size * prob) ** (-self.beta)
-            weights[i] = weight
-        
-        # Normalize weights to have max weight = 1
-        if len(weights) > 0:
-            weights = weights / np.max(weights)
+        actual_batch_size = min(batch_size, len(self._storage))
+        idxes = self._sample_proportional(actual_batch_size)
+
+        weights = []
+        p_min = self._it_min.min() / self._it_sum.sum()
+        max_weight = (p_min * len(self._storage)) ** (-self.beta)
+
+        for idx in idxes:
+            p_sample = self._it_sum[idx] / self._it_sum.sum()
+            weight = (p_sample * len(self._storage)) ** (-self.beta)
+            weights.append(weight / max_weight)
+        weights = np.array(weights, dtype=np.float32)
         
         # Increment beta
         self.beta = min(1.0, self.beta + self.beta_increment)
+        
+        experiences = self._encode_sample(idxes)
         
         # Final check to ensure no None values
         for i in range(len(experiences)):
             if experiences[i] is None:
                 # If we still have a None, replace it with a random valid experience
-                random_idx = np.random.choice(valid_indices)
-                experiences[i] = self.buffer[random_idx]
-                indices[i] = random_idx
-        
-        # Return sampled experiences, indices, and weights
-        return experiences, indices, weights
-    
+                random_idx = random.randint(0, len(self._storage) - 1)
+                experiences[i] = self._storage[random_idx]
+                idxes[i] = random_idx
+                
+        return experiences, idxes, weights
+
     def update_priorities(self, indices: List[int], priorities: List[float]):
+        """Update priorities of sampled transitions.
+
+        sets priority of transition at index indices[i] in buffer
+        to priorities[i].
+
+        Parameters
+        ----------
+        indices: [int]
+            List of indices of sampled transitions
+        priorities: [float]
+            List of updated priorities corresponding to
+            transitions at the sampled indices denoted by
+            variable `indices`.
         """
-        Update priorities for given indices.
-        
-        Args:
-            indices: List of indices to update
-            priorities: List of priorities to set
-        """
+        assert len(indices) == len(priorities)
         for idx, priority in zip(indices, priorities):
             # Ensure priority is positive
             priority = max(priority, self.epsilon)
@@ -314,16 +249,43 @@ class PrioritizedReplayBuffer:
             # Update max priority if needed
             self.max_priority = max(self.max_priority, priority)
             
-            # Check if index is valid and points to a non-None experience
-            if 0 <= idx < self.capacity and self.buffer[idx] is not None:
-                # Update priority in the sum tree
-                self.tree.update(idx + self.capacity - 1, priority ** self.alpha)
+            # Check if index is valid
+            if 0 <= idx < len(self._storage):
+                self._it_sum[idx] = priority ** self.alpha
+                self._it_min[idx] = priority ** self.alpha 
+
+def create_replay_buffer(size: int, use_per: bool = False, alpha: float = 0.6, beta: float = 0.4, 
+                        beta_increment: float = 0.001, epsilon: float = 0.01):
+    """
+    Factory function to create either a regular or prioritized replay buffer.
     
-    def __len__(self) -> int:
-        """
-        Get current size of buffer.
+    Parameters
+    ----------
+    size: int
+        Size of the replay buffer
+    use_per: bool
+        Whether to use prioritized experience replay
+    alpha: float
+        Prioritization exponent (0 = uniform, 1 = full prioritization)
+    beta: float
+        Initial importance sampling correction (0 = no correction, 1 = full correction)
+    beta_increment: float
+        Amount to increase beta each time we sample
+    epsilon: float
+        Small positive value to ensure non-zero priority
         
-        Returns:
-            Number of experiences in buffer
-        """
-        return self.size 
+    Returns
+    -------
+    ReplayBuffer or PrioritizedReplayBuffer
+        The created replay buffer
+    """
+    if use_per:
+        return PrioritizedReplayBuffer(
+            capacity=size,
+            alpha=alpha,
+            beta=beta,
+            beta_increment=beta_increment,
+            epsilon=epsilon
+        )
+    else:
+        return ReplayBuffer(size=size) 

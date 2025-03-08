@@ -5,7 +5,7 @@ import torch.optim as optim
 import random
 from collections import deque
 from typing import List, Tuple, Dict
-from replay_buffer import PrioritizedReplayBuffer
+from replay_buffer import PrioritizedReplayBuffer, create_replay_buffer
 from golf_game_v2 import Action
 
 class GolfMLP(nn.Module):
@@ -16,7 +16,7 @@ class GolfMLP(nn.Module):
     Output: Q-values for each possible action
     """
     
-    def __init__(self, input_size: int = 28, hidden_size: int = 512, output_size: int = 9, 
+    def __init__(self, input_size: int = 29, hidden_size: int = 512, output_size: int = 9, 
                  embedding_dim: int = 8, num_card_ranks: int = 13):
         super(GolfMLP, self).__init__()
         
@@ -32,8 +32,9 @@ class GolfMLP(nn.Module):
         self.num_card_positions = 14
         embedded_size = self.num_card_positions * embedding_dim
         
-        # Add the non-card features (12 binary flags for revealed cards + 2 game state flags)
-        self.non_card_features = 14
+        # Add the non-card features (12 binary flags for revealed cards + 3 game state flags)
+        # The 3 game state flags are: drawn from discard, final round, and turn progress
+        self.non_card_features = 15
         total_features = embedded_size + self.non_card_features
         
         # Network with two hidden layers and no dropout
@@ -52,9 +53,19 @@ class GolfMLP(nn.Module):
             nn.Linear(hidden_size, hidden_size),
             nn.LayerNorm(hidden_size),
             nn.LeakyReLU(0.1),
+
+            # Third hidden layer
+            nn.Linear(hidden_size, hidden_size // 2),
+            nn.LayerNorm(hidden_size // 2),
+            nn.LeakyReLU(0.1),
+
+            # Fourth hidden layer
+            nn.Linear(hidden_size // 2, hidden_size // 4),
+            nn.LayerNorm(hidden_size // 4),
+            nn.LeakyReLU(0.1),
             
             # Output layer
-            nn.Linear(hidden_size, output_size)
+            nn.Linear(hidden_size // 4, output_size)
         )
         
         # Initialize weights using Kaiming initialization (better for LeakyReLU)
@@ -101,7 +112,7 @@ class DQNAgent:
     
     def __init__(
         self,
-        state_size: int = 28,  # Size: 14 card indices + 14 binary features
+        state_size: int = 29,  # Size: 14 card indices + 15 binary features (including turn progress)
         action_size: int = 9,  # Number of possible actions in the game
         hidden_size: int = 512,  # Size of hidden layers in neural network
         embedding_dim: int = 8,  # Dimension of card embeddings
@@ -115,6 +126,7 @@ class DQNAgent:
         buffer_size: int = 100000,  # Size of replay memory
         batch_size: int = 256,  # Number of samples per training batch
         target_update: int = 250,  # Frequency of target network updates
+        use_per: bool = False,  # Whether to use prioritized experience replay
         per_alpha: float = 0.7,  # Prioritization exponent for replay buffer
         per_beta: float = 0.5,  # Initial importance sampling correction
         per_beta_increment: float = 0.0001  # Increment for beta parameter over time
@@ -138,8 +150,10 @@ class DQNAgent:
         # Replay buffer
         self.buffer_size = buffer_size
         self.batch_size = max(2, batch_size)  # Ensure batch size is at least 2
-        self.memory = PrioritizedReplayBuffer(
-            capacity=buffer_size,
+        self.use_per = use_per  # Whether to use prioritized experience replay
+        self.memory = create_replay_buffer(
+            size=buffer_size,
+            use_per=use_per,
             alpha=per_alpha,
             beta=per_beta,
             beta_increment=per_beta_increment
@@ -440,10 +454,11 @@ class DQNAgent:
             
             # Buffer parameters
             'buffer_size': self.buffer_size,
-            'per_alpha': self.memory.alpha,
-            'per_beta': self.memory.beta,
-            'per_beta_increment': self.memory.beta_increment,
-            'per_max_priority': self.memory.max_priority,
+            'use_per': self.use_per,
+            'per_alpha': self.memory.alpha if self.use_per else 0.7,
+            'per_beta': self.memory.beta if self.use_per else 0.5,
+            'per_beta_increment': self.memory.beta_increment if self.use_per else 0.0001,
+            'per_max_priority': self.memory.max_priority if self.use_per else 1.0,
             
             # Training state
             'update_counter': self.update_counter,
@@ -451,8 +466,12 @@ class DQNAgent:
             
             # Device and optimization settings
             'use_amp': self.use_amp,
-            'amp_scaler': self.scaler.state_dict() if self.use_amp else None
+            'amp_scaler': self.scaler.state_dict() if self.use_amp else None,
+            
+            # Device info
+            'device': str(self.device)
         }, path)
+        print(f"Model saved to {path}")
     
     def load(self, path: str):
         """Load model weights and all agent parameters."""
@@ -537,14 +556,17 @@ class DQNAgent:
         
         # Load buffer parameters with defaults
         self.buffer_size = checkpoint.get('buffer_size', self.buffer_size)
+        self.use_per = checkpoint.get('use_per', False)
+        
         # Recreate buffer with loaded parameters
-        self.memory = PrioritizedReplayBuffer(
-            capacity=self.buffer_size,
-            alpha=checkpoint.get('per_alpha', self.memory.alpha),
-            beta=checkpoint.get('per_beta', self.memory.beta),
-            beta_increment=checkpoint.get('per_beta_increment', self.memory.beta_increment)
+        self.memory = create_replay_buffer(
+            size=self.buffer_size,
+            use_per=self.use_per,
+            alpha=checkpoint.get('per_alpha', 0.7),
+            beta=checkpoint.get('per_beta', 0.5),
+            beta_increment=checkpoint.get('per_beta_increment', 0.0001)
         )
-        if 'per_max_priority' in checkpoint:
+        if 'per_max_priority' in checkpoint and self.use_per:
             self.memory.max_priority = checkpoint['per_max_priority']
         
         # Load training state with defaults
@@ -556,6 +578,8 @@ class DQNAgent:
         if self.use_amp and 'amp_scaler' in checkpoint and checkpoint['amp_scaler'] is not None:
             self.scaler = torch.cuda.amp.GradScaler()
             self.scaler.load_state_dict(checkpoint['amp_scaler'])
+        
+        print(f"Model loaded from {path}")
     
     def update_epsilon(self):
         """

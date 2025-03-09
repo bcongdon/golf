@@ -5,50 +5,20 @@ from tqdm import tqdm
 import os
 import argparse
 import logging
-from golf_game_v2 import GolfGame, GameConfig, Action, Card
+from golf_game_v2 import GolfGame, GameConfig, Action, Card, GameInfo
 from agent import DQNAgent
 import random
 from collections import deque
 import datetime
 from reflex_agent import ReflexAgent
-
-def get_run_dir():
-    """Generate a unique run directory name with timestamp."""
-    timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
-    run_dir = os.path.join('runs', f'dqn_run_{timestamp}')
-    return run_dir
-
-# Setup logging
-def setup_logging(log_level, run_dir):
-    """Set up logging configuration"""
-    numeric_level = getattr(logging, log_level.upper(), None)
-    if not isinstance(numeric_level, int):
-        raise ValueError(f'Invalid log level: {log_level}')
-    
-    # Create logs directory within run directory
-    logs_dir = os.path.join(run_dir, 'logs')
-    os.makedirs(logs_dir, exist_ok=True)
-    
-    # Create a timestamped log file
-    log_file = os.path.join(logs_dir, "training.log")
-    
-    logging.basicConfig(
-        level=numeric_level,
-        format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
-        handlers=[
-            logging.FileHandler(log_file),
-            logging.StreamHandler()
-        ]
-    )
-    logger = logging.getLogger("golf-ai")
-    logger.info(f"Logging to {log_file}")
-    return logger, logs_dir
+from training_utils import get_run_dir, setup_logging, setup_run_directories
+import torch.optim as optim
 
 def parse_args():
     parser = argparse.ArgumentParser(description='Train a DQN agent to play Golf')
     
     # Get default run directory
-    default_run_dir = get_run_dir()
+    default_run_dir = get_run_dir(algorithm_name='dqn')
     
     parser.add_argument('--run-dir', type=str, default=default_run_dir,
                         help='Directory for this training run (default: auto-generated with timestamp)')
@@ -164,48 +134,70 @@ def evaluate_agent(agent, num_episodes=100, logger=None):
                     episode_reward += reward
                 
                 state = next_state
-                if done:
-                    scores = info.get("scores", [0, 0])
-                    agent_score = scores[0]
-                    opponent_score = scores[1]
-
-                    print(f"Agent score: {agent_score}, Opponent score: {opponent_score}; Opponent type: {opponent_type}")
-                    
-                    if opponent_type == 'random':
-                        random_rewards.append(episode_reward)
-                        random_scores.append(agent_score)
-                        random_opponent_scores.append(opponent_score)
-                        
-                        if agent_score < opponent_score:
-                            random_wins += 1
-                            # Add to non-tie scores
-                            random_scores_no_ties.append(agent_score)
-                            random_opponent_scores_no_ties.append(opponent_score)
-                        elif agent_score > opponent_score:
-                            random_losses += 1
-                            # Add to non-tie scores
-                            random_scores_no_ties.append(agent_score)
-                            random_opponent_scores_no_ties.append(opponent_score)
-                        else:
-                            random_ties += 1
-                    else:  # reflex
-                        reflex_rewards.append(episode_reward)
-                        reflex_scores.append(agent_score)
-                        reflex_opponent_scores.append(opponent_score)
-                        
-                        if agent_score < opponent_score:
-                            reflex_wins += 1
-                            # Add to non-tie scores
-                            reflex_scores_no_ties.append(agent_score)
-                            reflex_opponent_scores_no_ties.append(opponent_score)
-                        elif agent_score > opponent_score:
-                            reflex_losses += 1
-                            # Add to non-tie scores
-                            reflex_scores_no_ties.append(agent_score)
-                            reflex_opponent_scores_no_ties.append(opponent_score)
-                        else:
-                            reflex_ties += 1
-    
+            
+            # Process episode results
+            if isinstance(info, dict) and "scores" in info:
+                scores = info["scores"]
+            elif hasattr(info, "scores") and info.scores:
+                scores = info.scores
+            else:
+                scores = [0, 0]
+            
+            agent_score = scores[agent_player]
+            opponent_idx = 1 if agent_player == 0 else 0
+            opponent_score = scores[opponent_idx]
+            
+            if opponent_type == 'random':
+                random_rewards.append(episode_reward)
+                random_scores.append(agent_score)
+                random_opponent_scores.append(opponent_score)
+                
+                if agent_score < opponent_score:
+                    random_wins += 1
+                    random_scores_no_ties.append(agent_score)
+                    random_opponent_scores_no_ties.append(opponent_score)
+                elif agent_score > opponent_score:
+                    random_losses += 1
+                    random_scores_no_ties.append(agent_score)
+                    random_opponent_scores_no_ties.append(opponent_score)
+                else:
+                    random_ties += 1
+            else:  # reflex
+                reflex_rewards.append(episode_reward)
+                reflex_scores.append(agent_score)
+                reflex_opponent_scores.append(opponent_score)
+                
+                if agent_score < opponent_score:
+                    reflex_wins += 1
+                    reflex_scores_no_ties.append(agent_score)
+                    reflex_opponent_scores_no_ties.append(opponent_score)
+                elif agent_score > opponent_score:
+                    reflex_losses += 1
+                    reflex_scores_no_ties.append(agent_score)
+                    reflex_opponent_scores_no_ties.append(opponent_score)
+                else:
+                    reflex_ties += 1
+            
+            # Check if max turns was reached
+            if done:
+                # Handle both dict and GameInfo objects
+                if isinstance(info, dict) and "max_turns_reached" in info and info["max_turns_reached"]:
+                    max_turns_reached = True
+                elif hasattr(info, "max_turns_reached") and info.max_turns_reached:
+                    max_turns_reached = True
+        
+        # Record metrics
+        rewards.append(episode_reward)
+        episode_steps.append(steps)
+        
+        # Track wins and max turns
+        if isinstance(info, dict) and "scores" in info and len(info["scores"]) > 1 and info["scores"][0] > info["scores"][1]:
+            win_count += 1
+        elif hasattr(info, "scores") and info.scores and len(info.scores) > 1 and info.scores[0] > info.scores[1]:
+            win_count += 1
+        if max_turns_reached:
+            max_turns_reached_count += 1
+            
     # Calculate metrics
     # Use non-tie scores for average score calculations
     random_avg_score = np.mean(random_scores_no_ties) if random_scores_no_ties else 0
@@ -268,14 +260,13 @@ def train(args, logger, logs_dir):
     """Train the DQN agent."""
     logger.info(f"Starting training with args: {args}")
     
-    # Create model save directory within run directory
-    models_dir = os.path.join(os.path.dirname(logs_dir), 'models')
-    os.makedirs(models_dir, exist_ok=True)
-    logger.info(f"Saving models to {models_dir}")
+    # Get all run directories
+    run_dir = os.path.dirname(logs_dir)
+    dirs = setup_run_directories(run_dir)
+    models_dir = dirs.models_dir
+    charts_dir = dirs.charts_dir
     
-    # Create charts directory within run directory
-    charts_dir = os.path.join(os.path.dirname(logs_dir), 'charts')
-    os.makedirs(charts_dir, exist_ok=True)
+    logger.info(f"Saving models to {models_dir}")
     logger.info(f"Saving charts to {charts_dir}")
     
     # Initialize metrics lists
@@ -291,6 +282,10 @@ def train(args, logger, logs_dir):
     eval_max_turns_rates = []
     eval_avg_scores = []
     eval_score_diffs = []
+    # Add reflex agent metrics
+    reflex_rewards = []
+    reflex_win_rates = []
+    reflex_score_diffs = []
     best_eval_reward = float('-inf')
     
     # Initialize environment with GameConfig
@@ -422,7 +417,7 @@ def train(args, logger, logs_dir):
         
         # Calculate and plot EMA of rewards
         if len(rewards) > 0:
-            rewards_ema = calculate_ema(rewards, alpha=0.1)
+            rewards_ema = list(calculate_ema(rewards, alpha=0.1))
             plt.plot(rewards_ema, color='red', linewidth=2, label='EMA (α=0.1)')
             
         plt.title('Episode Rewards')
@@ -430,11 +425,16 @@ def train(args, logger, logs_dir):
         plt.ylabel('Reward')
         plt.legend()
         
+        # Plot EMA of training loss (replacing the regular training loss plot)
         plt.subplot(4, 3, 2)
-        plt.plot(losses)
-        plt.title('Training Loss')
-        plt.xlabel('Episode')
-        plt.ylabel('Loss')
+        if len(losses) > 0:
+            plt.plot(losses, alpha=0.3, color='lightblue', label='Raw Loss')
+            loss_ema = list(calculate_ema(losses, alpha=0.1))
+            plt.plot(loss_ema, color='blue', linewidth=2, label='EMA (α=0.1)')
+            plt.title('Training Loss')
+            plt.xlabel('Episode')
+            plt.ylabel('Loss')
+            plt.legend()
         
         # Add epsilon plot
         plt.subplot(4, 3, 3)
@@ -447,7 +447,7 @@ def train(args, logger, logs_dir):
         if eval_rewards:
             plt.subplot(4, 3, 4)
             plt.plot(range(0, len(eval_rewards) * args.eval_interval, args.eval_interval), eval_rewards)
-            plt.title('Evaluation Rewards')
+            plt.title('Evaluation Rewards vs Random')
             plt.xlabel('Episode')
             plt.ylabel('Average Reward')
             
@@ -457,19 +457,23 @@ def train(args, logger, logs_dir):
             plt.xlabel('Episode')
             plt.ylabel('Win Rate')
             
-            plt.subplot(4, 3, 6)
-            plt.plot(range(0, len(eval_loss_rates) * args.eval_interval, args.eval_interval), eval_loss_rates)
-            plt.title('Loss Rate vs Random Opponent')
-            plt.xlabel('Episode')
-            plt.ylabel('Loss Rate')
+            # Add win rate vs reflex agent (replacing loss rate vs random)
+            if reflex_win_rates and len(reflex_win_rates) > 0:
+                plt.subplot(4, 3, 6)
+                plt.plot(range(0, len(reflex_win_rates) * args.eval_interval, args.eval_interval), reflex_win_rates)
+                plt.title('Win Rate vs Reflex Opponent')
+                plt.xlabel('Episode')
+                plt.ylabel('Win Rate')
         
         # Row 3: More evaluation metrics
         if eval_rewards:
-            plt.subplot(4, 3, 7)
-            plt.plot(range(0, len(eval_max_turns_rates) * args.eval_interval, args.eval_interval), eval_max_turns_rates)
-            plt.title('Max Turns Rate')
-            plt.xlabel('Episode')
-            plt.ylabel('Rate of Games Reaching Max Turns')
+            # Add evaluation rewards for reflex agent (replacing max turns rate)
+            if reflex_rewards and len(reflex_rewards) > 0:
+                plt.subplot(4, 3, 7)
+                plt.plot(range(0, len(reflex_rewards) * args.eval_interval, args.eval_interval), reflex_rewards)
+                plt.title('Evaluation Rewards vs Reflex')
+                plt.xlabel('Episode')
+                plt.ylabel('Average Reward')
             
             # Golf-specific metrics
             plt.subplot(4, 3, 8)
@@ -505,16 +509,14 @@ def train(args, logger, logs_dir):
             plt.ylabel('Q-Value')
             plt.legend()
         
-        plt.subplot(4, 3, 11)
-        # Plot EMA of training loss
-        if len(losses) > 0:
-            loss_ema = calculate_ema(losses, alpha=0.1)
-            plt.plot(losses, alpha=0.3, label='Loss')
-            plt.plot(loss_ema, color='blue', linewidth=2, label='EMA (α=0.1)')
-            plt.title('Training Loss with EMA')
+        # Add reflex score difference if available
+        if reflex_score_diffs and len(reflex_score_diffs) > 0:
+            plt.subplot(4, 3, 11)
+            eval_episodes = range(0, len(reflex_score_diffs) * args.eval_interval, args.eval_interval)
+            plt.plot(eval_episodes, reflex_score_diffs)
+            plt.title('Score Difference (Agent vs Reflex)')
             plt.xlabel('Episode')
-            plt.ylabel('Loss')
-            plt.legend()
+            plt.ylabel('Score Diff (Positive = Better)')
         
         plt.tight_layout()
         
@@ -524,17 +526,23 @@ def train(args, logger, logs_dir):
         plt.close()  # Close the figure to free memory
         
         # Save metrics as CSV for later analysis
-        import pandas as pd
         if eval_rewards:
             eval_data = {
                 'Episode': range(0, len(eval_rewards) * args.eval_interval, args.eval_interval),
-                'Reward': eval_rewards,
-                'WinRate': eval_win_rates,
-                'LossRate': eval_loss_rates,
-                'MaxTurnsRate': eval_max_turns_rates,
+                'Reward_vs_Random': eval_rewards,
+                'WinRate_vs_Random': eval_win_rates,
                 'AvgScore': eval_avg_scores,
-                'ScoreDiff': eval_score_diffs
+                'ScoreDiff_vs_Random': eval_score_diffs
             }
+            
+            # Add reflex metrics if available
+            if reflex_rewards and len(reflex_rewards) > 0:
+                eval_data['Reward_vs_Reflex'] = reflex_rewards
+            if reflex_win_rates and len(reflex_win_rates) > 0:
+                eval_data['WinRate_vs_Reflex'] = reflex_win_rates
+            if reflex_score_diffs and len(reflex_score_diffs) > 0:
+                eval_data['ScoreDiff_vs_Reflex'] = reflex_score_diffs
+                
             pd.DataFrame(eval_data).to_csv(os.path.join(logs_dir, 'eval_metrics.csv'), index=False)
         
         # Save training metrics
@@ -547,7 +555,7 @@ def train(args, logger, logs_dir):
             'Q_Max': q_value_max + [None] * (len(rewards) - len(q_value_max))
         }
         if losses:
-            train_data['Loss'] = losses + [None] * (len(rewards) - len(losses))
+            train_data['Loss_EMA'] = list(calculate_ema(losses, alpha=0.1)) + [None] * (len(rewards) - len(losses))
         pd.DataFrame(train_data).to_csv(os.path.join(logs_dir, 'training_metrics.csv'), index=False)
     
     # Determine if we should use multi-processing for environment steps
@@ -609,7 +617,14 @@ def train(args, logger, logs_dir):
             # Self-play (with some exploration)
             original_epsilon = agent.epsilon
             agent.epsilon = max(0.1, agent.epsilon)  # At least 10% exploration
-            action = agent.select_action(state, valid_actions, training=True)
+            
+            # Flip state perspective for player 1, since the agent was trained as player 0
+            if env.current_player == 1:
+                flipped_state = env.flip_state_perspective(state)
+                action = agent.select_action(flipped_state, valid_actions, training=True)
+            else:
+                action = agent.select_action(state, valid_actions, training=True)
+                
             agent.epsilon = original_epsilon  # Restore original epsilon
             return action
     
@@ -712,9 +727,6 @@ def train(args, logger, logs_dir):
     
     logger.info("Starting training loop")
     for episode in tqdm(range(args.episodes)):
-        # Reset reflex opponent flag for this episode
-        is_reflex_opponent = False
-        
         if episode % 10 == 0:
             logger.debug(f"Starting episode {episode+1}/{args.episodes}")
         state = env.reset()
@@ -754,26 +766,7 @@ def train(args, logger, logs_dir):
                     if len(agent.memory) >= effective_batch_size:
                         loss = agent.learn()
                         
-                        if loss is not None:
-                            # Check for potential learning instability
-                            if loss > 100:
-                                high_loss_count += 1
-                                consecutive_high_losses += 1
-                                logger.warning(f"High loss detected: {loss:.2f} at step {steps}, episode {episode+1}")
-                                
-                                # Automatic learning rate adjustment code removed
-                                if consecutive_high_losses >= 5:
-                                    # Reset consecutive high losses counter
-                                    consecutive_high_losses = 0
-                                    logger.warning(f"High loss streak ended")
-                                    
-                                    # Save a checkpoint for debugging
-                                    checkpoint_path = os.path.join(models_dir, f'checkpoint_high_loss_ep{episode+1}.pt')
-                                    agent.save(checkpoint_path)
-                                    logger.info(f"Saved checkpoint due to high losses: {checkpoint_path}")
-                            else:
-                                consecutive_high_losses = 0  # Reset counter when loss is normal
-                                
+                        if loss is not None:         
                             episode_losses.append(loss)
                     
                     # Clear batch after learning
@@ -797,15 +790,21 @@ def train(args, logger, logs_dir):
             steps += 1
             
             # Check if max turns was reached
-            if done and "max_turns_reached" in info and info["max_turns_reached"]:
-                max_turns_reached = True
+            if done:
+                # Handle both dict and GameInfo objects
+                if isinstance(info, dict) and "max_turns_reached" in info and info["max_turns_reached"]:
+                    max_turns_reached = True
+                elif hasattr(info, "max_turns_reached") and info.max_turns_reached:
+                    max_turns_reached = True
         
         # Record metrics
         rewards.append(episode_reward)
         episode_steps.append(steps)
         
         # Track wins and max turns
-        if info["scores"][0] > info["scores"][1]:
+        if isinstance(info, dict) and "scores" in info and len(info["scores"]) > 1 and info["scores"][0] > info["scores"][1]:
+            win_count += 1
+        elif hasattr(info, "scores") and info.scores and len(info.scores) > 1 and info.scores[0] > info.scores[1]:
             win_count += 1
         if max_turns_reached:
             max_turns_reached_count += 1
@@ -874,6 +873,11 @@ def train(args, logger, logs_dir):
             eval_avg_scores.append(-random_score_diff)  # Convert score diff to actual score
             eval_score_diffs.append(random_score_diff)
             
+            # Store reflex agent metrics
+            reflex_rewards.append(reflex_avg_reward)
+            reflex_win_rates.append(reflex_win_rate)
+            reflex_score_diffs.append(reflex_score_diff)
+            
             # Update Q-value tracking if available
             if q_stats:
                 q_value_avg.append(q_stats['mean'])
@@ -923,17 +927,25 @@ def train(args, logger, logs_dir):
     # Return final charts path for display
     return os.path.join(charts_dir, f'training_curves_ep{args.episodes}.png')
 
-if __name__ == "__main__":
+def main():
+    """Main entry point for training."""
     args = parse_args()
     
-    # Create run directory structure
+    # Create directories
     os.makedirs(args.run_dir, exist_ok=True)
+    
+    # Setup logging and get the directory structure
     logger, logs_dir = setup_logging(args.log_level, args.run_dir)
     
-    try:
-        logger.info(f"Starting Golf Card Game AI training in run directory: {args.run_dir}")
-        final_chart_path = train(args, logger, logs_dir)
-        logger.info(f"Training complete. Final charts saved to {final_chart_path}")
-    except Exception as e:
-        logger.exception(f"Error during training: {str(e)}")
-        raise 
+    # Set up additional directories
+    dirs = setup_run_directories(args.run_dir)
+    
+    # Train the agent and get the final chart path
+    final_chart_path = train(args, logger, logs_dir)
+    
+    print(f"Training completed. Final chart saved to: {final_chart_path}")
+    
+    return final_chart_path
+
+if __name__ == "__main__":
+    main() 

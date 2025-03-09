@@ -2,7 +2,7 @@ from enum import IntEnum
 import numpy as np
 import random
 from typing import List, Tuple, Dict, Optional, Union, Set
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 class Action(IntEnum):
     """Enumeration of possible actions in the game."""
@@ -48,6 +48,31 @@ class Card(IntEnum):
         """Get the symbol representation of the card."""
         symbols = "A23456789TJQK"
         return symbols[int(self)]
+
+@dataclass
+class GameInfo:
+    """Information about the game state and action results."""
+    # Turn information
+    turn_count: int = 0
+    max_turns: int = 0
+    turn_progress: float = 0.0
+    
+    # Game ending conditions
+    max_turns_reached: bool = False
+    game_end_reason: str = ""
+    
+    # Card reveal information
+    was_previously_revealed: bool = True
+    
+    # Final round information
+    final_round: bool = False
+    trigger_player: int = -1
+    
+    # Scores (final or current)
+    scores: List[int] = field(default_factory=list)
+    
+    # Error handling
+    error: str = ""
 
 @dataclass
 class GameConfig:
@@ -195,14 +220,14 @@ class GolfGame:
         for i, rank in enumerate(self.player_hands[self.current_player]):
             if i in self.revealed_cards[self.current_player]:
                 obs[i] = rank
-                obs[2 * cards_per_player + i] = 1.0  # Revealed flag
+                obs[2 * cards_per_player + 2 + i] = 1.0  # Revealed flag (after discard and drawn card indices)
         
         # Opponent's visible cards
         opponent = (self.current_player + 1) % self.config.num_players
         for i, rank in enumerate(self.player_hands[opponent]):
             if i in self.revealed_cards[opponent]:
                 obs[cards_per_player + i] = rank
-                obs[2 * cards_per_player + cards_per_player + i] = 1.0
+                obs[2 * cards_per_player + 2 + cards_per_player + i] = 1.0  # Revealed flag (after discard and drawn card)
         
         # Discard and drawn cards
         if self.discard_pile:
@@ -222,42 +247,41 @@ class GolfGame:
             
         return obs
     
-    def step(self, action: Union[Action, int]) -> Tuple[np.ndarray, float, bool, Dict]:
+    def step(self, action: Union[Action, int]) -> Tuple[np.ndarray, float, bool, GameInfo]:
         """Take a step in the environment."""
         action = Action(action)
         if action not in self._get_valid_actions():
-            invalid_info = {
-                "error": "Invalid action",
-                "turn_count": self.turn_count,
-                "max_turns": self.config.max_turns,
-                "turn_progress": self.turn_count / self.config.max_turns
-            }
+            info = GameInfo(
+                error="Invalid action",
+                turn_count=self.turn_count,
+                max_turns=self.config.max_turns,
+                turn_progress=self.turn_count / self.config.max_turns
+            )
             return (self._get_observation(), 
                     self._normalize_reward(-1), 
                     False, 
-                    invalid_info)
+                    info)
         
         reward = 0
-        info = {}
+        info = GameInfo()
         
         # Handle drawing phase
         if self.drawn_card is None:
             # Increment turn counter at the start of each complete turn
             self.turn_count += 1
             
-            # Add turn progress information to info dictionary
-            info["turn_count"] = self.turn_count
-            info["max_turns"] = self.config.max_turns
-            info["turn_progress"] = self.turn_count / self.config.max_turns
+            # Add turn progress information to info
+            info.turn_count = self.turn_count
+            info.max_turns = self.config.max_turns
+            info.turn_progress = self.turn_count / self.config.max_turns
             
             # Check max turns
             if self.turn_count >= self.config.max_turns:
                 self.game_over = True
-                info["max_turns_reached"] = True
-                info["game_end_reason"] = f"Game ended after reaching maximum turns ({self.config.max_turns})"
+                info.max_turns_reached = True
+                info.game_end_reason = f"Game ended after reaching maximum turns ({self.config.max_turns})"
                 # Calculate final scores and add to info
-                scores = [self._calculate_score(p) for p in range(self.config.num_players)]
-                info["scores"] = scores
+                info.scores = [self._calculate_score(p) for p in range(self.config.num_players)]
                 # Calculate proper terminal reward
                 reward = self._calculate_terminal_reward(info)
                 return self._get_observation(), self._normalize_reward(reward, True), True, info
@@ -278,6 +302,7 @@ class GolfGame:
                 
                 # Store whether this position was previously revealed (for reward calculation)
                 was_previously_revealed = position in self.revealed_cards[self.current_player]
+                info.was_previously_revealed = was_previously_revealed
                 
                 # Replace the card
                 self.player_hands[self.current_player][position] = self.drawn_card
@@ -286,9 +311,6 @@ class GolfGame:
                 # Add to revealed cards
                 self.revealed_cards[self.current_player].add(position)
                 
-                # Store the information about whether this was a new reveal (for reward calculation)
-                info["was_previously_revealed"] = was_previously_revealed
-                
                 # Check for final round trigger
                 cards_per_player = self.config.grid_rows * self.config.grid_cols
                 if (len(self.revealed_cards[self.current_player]) == cards_per_player 
@@ -296,8 +318,8 @@ class GolfGame:
                     self.final_round = True
                     self.last_player = ((self.current_player + self.config.num_players - 1) 
                                       % self.config.num_players)
-                    info["final_round"] = True
-                    info["trigger_player"] = self.current_player
+                    info.final_round = True
+                    info.trigger_player = self.current_player
             else:  # Discard
                 self.discard_pile.append(self.drawn_card)
             
@@ -306,10 +328,9 @@ class GolfGame:
             # Check if game should end before advancing turn
             if self.final_round and self.current_player == self.last_player:
                 self.game_over = True
-                info["game_end_reason"] = "Game ended after final round completed"
+                info.game_end_reason = "Game ended after final round completed"
                 # Calculate final scores
-                scores = [self._calculate_score(p) for p in range(self.config.num_players)]
-                info["scores"] = scores
+                info.scores = [self._calculate_score(p) for p in range(self.config.num_players)]
             
             self._advance_turn()
         
@@ -332,7 +353,7 @@ class GolfGame:
         """Advance to the next player's turn."""
         self.current_player = (self.current_player + 1) % self.config.num_players
     
-    def _calculate_step_reward(self, action: Action, info: Dict) -> float:
+    def _calculate_step_reward(self, action: Action, info: GameInfo) -> float:
         """Calculate the reward for the current step."""
         if self.game_over:
             return self._calculate_terminal_reward(info)
@@ -340,14 +361,14 @@ class GolfGame:
         # For all actions, calculate the intermediate reward
         return self._calculate_intermediate_reward(action, info)
     
-    def _calculate_terminal_reward(self, info: Dict) -> float:
+    def _calculate_terminal_reward(self, info: GameInfo) -> float:
         """Calculate terminal reward based on final scores."""
         # Use scores from info if available, otherwise calculate them
-        if "scores" in info:
-            scores = info["scores"]
+        if info.scores:
+            scores = info.scores
         else:
             scores = [self._calculate_score(p) for p in range(self.config.num_players)]
-            info["scores"] = scores
+            info.scores = scores
             
         min_score = min(scores)
         current_player_score = scores[self.current_player]
@@ -369,7 +390,7 @@ class GolfGame:
             # Losing player's reward is based on how far they are from the minimum score
             return -0.3 * (current_player_score - min_score)
     
-    def _calculate_intermediate_reward(self, action: Action, info: Dict) -> float:
+    def _calculate_intermediate_reward(self, action: Action, info: GameInfo) -> float:
         """Calculate intermediate reward based on action taken."""
         reward = 0.0
         
@@ -394,7 +415,7 @@ class GolfGame:
                 reward += 2.0  # Increased from 1.0 to 2.0
             
             # Reward for revealing cards - use the stored information about whether the position was previously revealed
-            if not info.get("was_previously_revealed", True):
+            if not info.was_previously_revealed:
                 reward += 0.2  # Increased from 0.1 to 0.2
         
         elif action == Action.DISCARD:
@@ -407,7 +428,7 @@ class GolfGame:
                     bottom_pos in self.revealed_cards[self.current_player]):
                     if (self.player_hands[self.current_player][top_pos] == discarded_rank or 
                         self.player_hands[self.current_player][bottom_pos] == discarded_rank):
-                        reward -= 1.0  # Increased from 0.5 to 1.0
+                        reward -= 3.0 # Penalty for discarding a potential match is higher than getting a match
         
         # Reduced penalty based on visible score
         visible_score = self._calculate_visible_score()
@@ -431,13 +452,44 @@ class GolfGame:
                     if hand[top_pos] == Card.TWO:
                         score -= 4
                     continue
-                score += hand[top_pos].point_value + hand[bottom_pos].point_value
+                score += Card(hand[top_pos]).point_value + Card(hand[bottom_pos]).point_value
             elif top_revealed:
-                score += hand[top_pos].point_value
+                score += Card(hand[top_pos]).point_value
             elif bottom_revealed:
-                score += hand[bottom_pos].point_value
+                score += Card(hand[bottom_pos]).point_value
         
         return score
+    
+    def flip_state_perspective(self, state: np.ndarray) -> np.ndarray:
+        """
+        Flip the state observation from one player's perspective to the other.
+        
+        This allows an agent to correctly interpret the state when acting as player 1.
+        
+        Args:
+            state: The original state observation
+            
+        Returns:
+            The flipped state observation
+        """
+        cards_per_player = self.config.grid_rows * self.config.grid_cols
+        flipped_state = np.copy(state)
+        
+        # Swap player hand with opponent hand
+        player_hand = state[:cards_per_player]
+        opponent_hand = state[cards_per_player:2*cards_per_player]
+        flipped_state[:cards_per_player] = opponent_hand
+        flipped_state[cards_per_player:2*cards_per_player] = player_hand
+        
+        # Swap revealed flags
+        player_revealed = state[2*cards_per_player + 2:2*cards_per_player + 2 + cards_per_player]
+        opponent_revealed = state[2*cards_per_player + 2 + cards_per_player:2*cards_per_player + 2 + 2*cards_per_player]
+        flipped_state[2*cards_per_player + 2:2*cards_per_player + 2 + cards_per_player] = opponent_revealed
+        flipped_state[2*cards_per_player + 2 + cards_per_player:2*cards_per_player + 2 + 2*cards_per_player] = player_revealed
+        
+        # Keep discard, drawn card, and flags the same
+        
+        return flipped_state
     
     def render(self) -> str:
         """Return a string representation of the game state."""

@@ -3,6 +3,7 @@ import datetime
 import logging
 from typing import Tuple, Dict
 from dataclasses import dataclass
+import numpy as np
 
 @dataclass
 class RunDirectories:
@@ -93,4 +94,22 @@ def setup_run_directories(run_dir: str) -> RunDirectories:
         logs_dir=logs_dir,
         models_dir=models_dir,
         charts_dir=charts_dir
-    ) 
+    )
+
+def calculate_ema(data, alpha=0.1):
+    """
+    Calculate Exponential Moving Average with the given alpha.
+    
+    Args:
+        data: Array-like data to calculate EMA for
+        alpha: Smoothing factor (higher = less smoothing)
+        
+    Returns:
+        Array with EMA values
+    """
+    ema = np.zeros_like(data, dtype=float)
+    if len(data) > 0:
+        ema[0] = data[0]
+        for i in range(1, len(data)):
+            ema[i] = alpha * data[i] + (1 - alpha) * ema[i-1]
+    return ema 

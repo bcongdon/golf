@@ -15,7 +15,7 @@ class GolfPettingZooEnv(AECEnv):
     This adapter makes the Golf game compatible with PettingZoo's multi-agent
     reinforcement learning interface.
     """
-    metadata = {"render_modes": ["human", "ansi"], "name": "golf_v0", "is_parallelizable": True}
+    metadata = {"render_modes": ["human", "ansi"], "name": "golf_v0", "is_parallelizable": False}
     
     def __init__(self, config: Optional[GameConfig] = None, render_mode: Optional[str] = None):
         """
@@ -32,6 +32,9 @@ class GolfPettingZooEnv(AECEnv):
             config = GameConfig()
         self.game = GolfGame(config)
         self.render_mode = render_mode
+
+        raise "Foo"
+
         
         # PettingZoo requires a list of agent names
         self.possible_agents = [f"player_{i}" for i in range(self.game.config.num_players)]
@@ -64,7 +67,6 @@ class GolfPettingZooEnv(AECEnv):
         
         # Initialize additional info
         self.rewards = {agent: 0.0 for agent in self.possible_agents}
-        self._cumulative_rewards = {agent: 0.0 for agent in self.possible_agents}
         self.terminations = {agent: False for agent in self.possible_agents}
         self.truncations = {agent: False for agent in self.possible_agents}
         self.infos = {agent: {} for agent in self.possible_agents}
@@ -119,7 +121,6 @@ class GolfPettingZooEnv(AECEnv):
         # Reset PettingZoo specific attributes
         self.agents = self.possible_agents.copy()
         self.rewards = {agent: 0.0 for agent in self.agents}
-        self._cumulative_rewards = {agent: 0.0 for agent in self.agents}
         self.terminations = {agent: False for agent in self.agents}
         self.truncations = {agent: False for agent in self.agents}
         self.infos = {agent: {} for agent in self.agents}
@@ -142,12 +143,6 @@ class GolfPettingZooEnv(AECEnv):
         self.num_moves = 0
     
     def step(self, action):
-        """
-        Take a step in the environment.
-        
-        Args:
-            action: The action to take
-        """
         if (
             self.terminations[self.agent_selection] 
             or self.truncations[self.agent_selection]
@@ -158,62 +153,63 @@ class GolfPettingZooEnv(AECEnv):
         agent = self.agent_selection
         agent_idx = int(agent.split("_")[1])
         
-        # Make sure the current agent is the one taking the action
         assert agent_idx == self.game.current_player, "Wrong agent is taking an action"
         
-        # Validate action
         valid_actions = self.game._get_valid_actions()
         valid_action_values = [a.value for a in valid_actions]
         
         if action not in valid_action_values:
-            # If invalid action, provide a negative reward but don't change the game state
             self.rewards[agent] = -1.0
             self.infos[agent]["error"] = f"Invalid action: {action}"
             return
         
-        # Take action in the underlying game
         obs, reward, done, info = self.game.step(action)
         
-        # Update the rewards for the current agent
         self.rewards[agent] = reward
-        self._cumulative_rewards[agent] += reward
         
-        # Check if the game is done
         if done:
-            # Update terminations and truncations
+            scores = info.scores
+            min_score = min(scores)
+            num_tied_for_first = scores.count(min_score)
+            
+            for a in self.agents:
+                a_idx = int(a.split("_")[1])
+                player_score = scores[a_idx]
+                if player_score == min_score:
+                    if num_tied_for_first > 1:
+                        margin = sum(scores) / len(scores) - player_score
+                        terminal_reward = 2.5 + 0.3 * margin
+                    else:
+                        margin = sum(scores) / len(scores) - player_score
+                        terminal_reward = 5.0 + 0.3 * margin
+                else:
+                    terminal_reward = -0.3 * (player_score - min_score)
+                self.rewards[a] = terminal_reward
+            
             if isinstance(info, GameInfo) and info.max_turns_reached:
-                # If max turns reached, mark as truncated
                 for a in self.agents:
                     self.truncations[a] = True
             else:
-                # If game ended normally, mark as terminated
                 for a in self.agents:
                     self.terminations[a] = True
             
-            # Update scores and other info
             for a in self.agents:
                 a_idx = int(a.split("_")[1])
                 self.infos[a].update({
                     "episode_length": self.num_moves,
-                    "score": info.scores[a_idx] if hasattr(info, "scores") and a_idx < len(info.scores) else None,
+                    "score": info.scores[a_idx],
                     "final_round": self.game.final_round,
                     "game_end_reason": info.game_end_reason if hasattr(info, "game_end_reason") else None
                 })
         else:
-            # Game continues - select the next agent
             self.agent_selection = self._agent_selector.next()
-            
-            # Make sure the agent selection matches the current player in the game
             while int(self.agent_selection.split("_")[1]) != self.game.current_player:
                 self.agent_selection = self._agent_selector.next()
             
-            # Update valid actions
             self.current_valid_actions = self.game._get_valid_actions()
-            
-            # Update infos with valid actions for all agents
             for a in self.agents:
                 self.infos[a]["valid_actions"] = [a.value for a in self.current_valid_actions]
-            
+        
         self.num_moves += 1
     
     def render(self):

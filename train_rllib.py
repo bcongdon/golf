@@ -14,11 +14,11 @@ from ray.rllib.algorithms.ppo import PPOConfig
 from ray.rllib.algorithms.dqn import DQNConfig
 from ray.rllib.algorithms.impala import ImpalaConfig
 from ray.rllib.env.wrappers.pettingzoo_env import PettingZooEnv
+from ray.rllib.env.wrappers.multi_agent_env_compatibility import MultiAgentEnvCompatibility
 from ray.tune.registry import register_env
 
 # PettingZoo environment
-from golf_pettingzoo_env import env as golf_env
-from golf_game_v2 import GameConfig
+from golf_game_env_v2 import env as golf_env
 
 # Evaluation and monitoring utilities
 from ray.rllib.policy.policy import Policy
@@ -73,12 +73,16 @@ def parse_args():
 
 def env_creator(config):
     """Create the Golf PettingZoo environment with given config."""
-    game_config = GameConfig(
-        num_players=config.get("num_players", 2),
-        grid_rows=config.get("grid_rows", 2),
-        grid_cols=config.get("grid_cols", 3)
+    # Create the environment
+    env = golf_env(
+        num_players=config.get("num_players", 2), 
+        render_mode=config.get("render_mode", "human")  # Use 'human' only for evaluation
     )
-    return golf_env(config=game_config, render_mode=config.get("render_mode", None))
+    
+    # Wrap with compatibility wrapper if needed
+    # The PettingZooEnv wrapper should handle this now, but we include this for safety
+    # return MultiAgentEnvCompatibility(env)
+    return env
 
 
 def setup_rllib_config(args, env_name):
@@ -92,8 +96,6 @@ def setup_rllib_config(args, env_name):
         config = config.environment(env=env_name)
         config = config.environment(env_config={
             "num_players": args.num_players,
-            "grid_rows": args.grid_rows,
-            "grid_cols": args.grid_cols,
         })
         
         # Configure resources
@@ -101,6 +103,12 @@ def setup_rllib_config(args, env_name):
         
         # Configure framework
         config = config.framework(framework="torch")
+        
+        # Disable new API stack which causes issues
+        config = config.api_stack(
+            enable_rl_module_and_learner=False,
+            enable_env_runner_and_connector_v2=False
+        )
         
         # Configure training parameters
         config = config.training(
@@ -125,8 +133,6 @@ def setup_rllib_config(args, env_name):
         config = config.environment(env=env_name)
         config = config.environment(env_config={
             "num_players": args.num_players,
-            "grid_rows": args.grid_rows,
-            "grid_cols": args.grid_cols,
         })
         
         # Configure resources
@@ -134,6 +140,12 @@ def setup_rllib_config(args, env_name):
         
         # Configure framework
         config = config.framework(framework="torch")
+        
+        # Disable new API stack which causes issues
+        config = config.api_stack(
+            enable_rl_module_and_learner=False,
+            enable_env_runner_and_connector_v2=False
+        )
         
         # Configure training parameters
         config = config.training(
@@ -154,14 +166,19 @@ def setup_rllib_config(args, env_name):
             policy_mapping_fn=lambda agent_id, *args, **kwargs: "shared_policy"
         )
         
+        # Configure rollout parameters
+        config = config.rollouts(
+            num_rollout_workers=args.num_workers,
+            rollout_fragment_length=1,
+            batch_mode="truncate_episodes",
+        )
+    
     elif args.algorithm == "IMPALA":
         config = ImpalaConfig()
         # Configure the environment
         config = config.environment(env=env_name)
         config = config.environment(env_config={
             "num_players": args.num_players,
-            "grid_rows": args.grid_rows,
-            "grid_cols": args.grid_cols,
         })
         
         # Configure resources
@@ -170,11 +187,16 @@ def setup_rllib_config(args, env_name):
         # Configure framework
         config = config.framework(framework="torch")
         
+        # Disable new API stack which causes issues
+        config = config.api_stack(
+            enable_rl_module_and_learner=False,
+            enable_env_runner_and_connector_v2=False
+        )
+        
         # Configure training parameters
         config = config.training(
-            gamma=0.99,
-            lambda_=0.95,
             train_batch_size=args.train_batch_size,
+            gamma=0.99,
             lr=args.lr,
         )
         
@@ -182,6 +204,13 @@ def setup_rllib_config(args, env_name):
         config = config.multi_agent(
             policies={"shared_policy": (None, None, None, {})},
             policy_mapping_fn=lambda agent_id, *args, **kwargs: "shared_policy"
+        )
+        
+        # Configure rollout parameters
+        config = config.rollouts(
+            num_rollout_workers=args.num_workers,
+            rollout_fragment_length=1,
+            batch_mode="truncate_episodes",
         )
     else:
         raise ValueError(f"Unsupported algorithm: {args.algorithm}")
@@ -298,8 +327,10 @@ def main():
     # Initialize Ray
     ray.init()
     
-    # Register the environment
+    # Register the environment with proper compatibility wrapper
     env_name = "golf_v0"
+    
+    # Register the environment with PettingZooEnv wrapper
     register_env(env_name, lambda config: PettingZooEnv(env_creator(config)))
     
     # Create experiment name and directory
